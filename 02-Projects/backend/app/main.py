@@ -1,17 +1,15 @@
 from fastapi import FastAPI
 
-from app.routers import auth, health, users
-
+from app.routers import auth, health, users, documents
 
 app = FastAPI(
     title="AI Knowledge Workspace API"
 )
 
-
 app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(users.router)
-
+app.include_router(documents.router)
 
 @app.get("/")
 def root():
