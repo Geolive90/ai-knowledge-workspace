@@ -13,6 +13,12 @@ from app.models.document import Document  # noqa: F401
 from app.models.document_chunk import DocumentChunk  # noqa: F401
 from app.models.user import User
 from app.services.embedding.factory import clear_embedding_caches
+from app.services.vector_store.exceptions import (
+    VectorStoreDimensionMismatchError,
+    VectorStoreDuplicateIdError,
+)
+from app.services.vector_store.factory import clear_vector_store_caches
+from app.services.vector_store.provider import VectorAddItem, VectorSearchResult
 from app.utils.security import hash_password
 
 
@@ -70,6 +76,81 @@ class CountingEmbeddingProvider(FakeEmbeddingProvider):
         return super().embed_texts(texts)
 
 
+class FakeVectorStore:
+    def __init__(self, dimensions: int = 8) -> None:
+        self._dimensions = dimensions
+        self._vectors: dict[int, list[float]] = {}
+
+    @property
+    def dimensions(self) -> int:
+        return self._dimensions
+
+    @property
+    def count(self) -> int:
+        return len(self._vectors)
+
+    def add(self, items: list[VectorAddItem]) -> None:
+        seen_in_batch: set[int] = set()
+        for item in items:
+            if item.chunk_id in self._vectors or item.chunk_id in seen_in_batch:
+                raise VectorStoreDuplicateIdError(
+                    f"chunk_id {item.chunk_id} already exists in the vector index."
+                )
+            seen_in_batch.add(item.chunk_id)
+            if len(item.vector) != self._dimensions:
+                raise VectorStoreDimensionMismatchError(
+                    "Vector dimensions do not match the configured index dimensions."
+                )
+            self._vectors[item.chunk_id] = self._normalize(item.vector)
+
+    def search(self, query_vector: list[float], k: int) -> list[VectorSearchResult]:
+        if k <= 0 or not self._vectors:
+            return []
+        if len(query_vector) != self._dimensions:
+            raise VectorStoreDimensionMismatchError(
+                "Vector dimensions do not match the configured index dimensions."
+            )
+
+        query = self._normalize(query_vector)
+        scored = [
+            VectorSearchResult(
+                chunk_id=chunk_id,
+                score=sum(left * right for left, right in zip(query, vector)),
+            )
+            for chunk_id, vector in self._vectors.items()
+        ]
+        scored.sort(key=lambda result: result.score, reverse=True)
+        return scored[:k]
+
+    def remove_by_chunk_ids(self, chunk_ids: list[int]) -> int:
+        removed = 0
+        for chunk_id in chunk_ids:
+            if chunk_id in self._vectors:
+                del self._vectors[chunk_id]
+                removed += 1
+        return removed
+
+    def clear(self) -> None:
+        self._vectors.clear()
+
+    def save(self) -> None:
+        return None
+
+    def load(self) -> None:
+        return None
+
+    def _normalize(self, vector: list[float]) -> list[float]:
+        norm = sum(value * value for value in vector) ** 0.5
+        if norm == 0:
+            raise RuntimeError("Zero-norm vector cannot be indexed or searched.")
+        return [value / norm for value in vector]
+
+
+@pytest.fixture
+def fake_vector_store() -> FakeVectorStore:
+    return FakeVectorStore()
+
+
 @pytest.fixture
 def fake_embedding_provider() -> FakeEmbeddingProvider:
     return FakeEmbeddingProvider()
@@ -78,8 +159,10 @@ def fake_embedding_provider() -> FakeEmbeddingProvider:
 @pytest.fixture(autouse=True)
 def clear_embedding_factory_caches():
     clear_embedding_caches()
+    clear_vector_store_caches()
     yield
     clear_embedding_caches()
+    clear_vector_store_caches()
 
 
 @pytest.fixture

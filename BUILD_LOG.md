@@ -1386,14 +1386,216 @@ The following items supplement earlier milestones. Items marked **(owner-reporte
 
 ## F. Current Alembic Head and Implementation Gap
 
-**Repository-proven code state after Phase 4B embedding provider and service:**
+**Repository-proven code state after Phase 4C vector store / FAISS:**
 
 - Models: `User`, `Document`, `DocumentChunk`, `ChunkEmbedding`
-- Services: `document_service`, `text_extraction_service`, `chunking_service`, `embedding` package (`EmbeddingService`, `SentenceTransformersProvider`)
+- Services: `document_service`, `text_extraction_service`, `chunking_service`, `embedding` package, `vector_store` package (`FaissVectorStore`)
 - Upload persists normalized `extracted_text` and chunk rows atomically via `create_document_with_chunks()`
-- Text-to-vector conversion available via `EmbeddingService`; not yet wired to upload
+- Text-to-vector conversion available via `EmbeddingService`; FAISS vector storage available via `VectorStore` / `FaissVectorStore`
+- Not yet wired: upload orchestration embed + metadata + index (Phase 4D)
 - `chunk_embeddings` metadata schema in place; Alembic head `f3a1b8c45201`
-- `requirements.txt` pins `sentence-transformers==5.6.0` only
-- **Next implementation step:** Phase 4C — `VectorStore` abstraction and FAISS implementation
+- `requirements.txt` pins `sentence-transformers==5.6.0` and `faiss-cpu==1.14.3`
+- **Next implementation step:** Phase 4D — upload pipeline integration (atomic embed + index)
+
+---
+
+# Embeddings — Phase 4C (Vector Store / FAISS) — July 22, 2026
+
+## Status
+
+**Complete, verified, and approved** (July 22, 2026).
+
+## Objective
+
+Design and implement a provider-independent vector-storage layer with FAISS as the sole Version 1 concrete implementation. Store embedding vectors keyed by `chunk_id` without persisting vectors in SQLite, upload integration, semantic retrieval, or RAG behavior.
+
+## Chronology
+
+| Step | Event |
+|------|-------|
+| 1 | Architecture proposal for `VectorStore` Protocol + `FaissVectorStore` |
+| 2 | Independent review — refinements: remove `VECTOR_STORE_DIMENSIONS`, expand duplicate-ID rationale, clarify RLock concurrency, add persistence invariant |
+| 3 | Final architecture approval |
+| 4 | Implementation of vector-store package, config, tests |
+| 5 | `faiss-cpu==1.14.3` installed and verified (Windows Python 3.10.5, NumPy 2.2.6) |
+| 6 | Initial test results: 70 passed default; 84 passed with FAISS integration |
+| 7 | Independent review (Bugbot): same-batch duplicate-ID overwrite defect found |
+| 8 | Fix + tests for same-batch duplicate rejection |
+| 9 | Targeted verification pass requested before final approval |
+| 10 | Manual smoke test executed outside pytest — passed |
+| 11 | Git file-count reconciliation: **12 files** (9 created + 3 modified) |
+| 12 | Missing edge-case tests added (zero-norm query, batch no-mutation, missing-file clears memory, save-failure cleanup, factory cache refresh, etc.) |
+| 13 | Loaded FAISS inner-index structure validation defect found and fixed |
+| 14 | Final test results: 16 / 72+22 / 20 / 92+2 |
+| 15 | Final approval granted |
+
+## Architecture (Repository-Proven)
+
+```text
+EmbeddingProvider.dimensions
+        ↓
+Vector-store factory (one-time read at construction)
+        ↓
+FaissVectorStore(dimensions=...)
+        ↓
+IndexIDMap2(IndexFlatIP)
+```
+
+- **`chunk_id`** is the persistent vector identifier
+- Cosine-style similarity via L2-normalized vectors + inner-product search
+- Duplicate `chunk_id` rejected loudly (including within same batch)
+- Core abstraction and FAISS implementation do **not** import embedding; only `factory.py` lazy-imports `get_embedding_provider()`
+- Explicit `save()` / `load()`; atomic save via `.faiss.tmp` + replacement
+- Missing file → empty valid store; corrupt/wrong-dimension/incompatible structure → `VectorStoreLoadError`
+- Per-instance `RLock`; Version 1 single-process limitation
+
+## Files Created (9 New Files)
+
+### Vector store package (6 files)
+
+| File | Purpose |
+|------|---------|
+| `02-Projects/backend/app/services/vector_store/__init__.py` | Public exports |
+| `02-Projects/backend/app/services/vector_store/exceptions.py` | Exception hierarchy |
+| `02-Projects/backend/app/services/vector_store/provider.py` | `VectorStore` Protocol, `VectorAddItem`, `VectorSearchResult` |
+| `02-Projects/backend/app/services/vector_store/factory.py` | Factory + cached singleton |
+| `02-Projects/backend/app/services/vector_store/providers/__init__.py` | Provider package |
+| `02-Projects/backend/app/services/vector_store/providers/faiss.py` | `FaissVectorStore` |
+
+### Tests (3 files)
+
+| File | Purpose |
+|------|---------|
+| `02-Projects/backend/tests/test_vector_store_factory.py` | Factory/config tests (6) |
+| `02-Projects/backend/tests/test_vector_store_protocol.py` | Protocol unit tests via `FakeVectorStore` (10) |
+| `02-Projects/backend/tests/test_faiss_vector_store.py` | Opt-in FAISS integration tests (20) |
+
+## Files Modified (3 Files)
+
+| File | Change |
+|------|--------|
+| `02-Projects/backend/app/config.py` | `vector_store_provider`, `faiss_index_path` |
+| `02-Projects/backend/requirements.txt` | Added `faiss-cpu==1.14.3` |
+| `02-Projects/backend/tests/conftest.py` | `FakeVectorStore`, autouse vector-store cache clearing |
+
+**Total touched:** 9 new + 3 modified = **12 files**
+
+**File count correction:** An earlier Cursor display showed "11 Files Changed." The actual Git working tree contained **12 files** — the under-count likely omitted `providers/__init__.py` or grouped the untracked directory.
+
+## Dependencies
+
+| Package | Version | Notes |
+|---------|---------|-------|
+| `faiss-cpu` | **1.14.3** | Pinned in `requirements.txt`; verified on Windows cp310 wheel |
+| `sentence-transformers` | **5.6.0** | Unchanged from Phase 4B |
+| `numpy` | **2.2.6** | Existing in `.venv`; compatible with faiss-cpu 1.14.3 wheel |
+
+Install verification:
+
+```powershell
+pip install faiss-cpu==1.14.3
+python -c "import faiss; print(faiss.__version__)"
+```
+
+**Result:** `1.14.3`
+
+## Defect 1 — Same-Batch Duplicate `chunk_id` Overwrite
+
+**What:** `FaissVectorStore.add()` checked duplicates only against `_known_ids`, not within the incoming batch. Two items with the same `chunk_id` in one call could pass validation; FAISS would silently overwrite.
+
+**Why it mattered:** Approved architecture requires duplicate IDs to fail loudly — duplicates indicate orchestration bugs (double upload, retry after partial failure, inconsistent rebuild). Silent overwrite would mask drift between SQLite and FAISS.
+
+**Fix:** Added `seen_in_batch` set; reject if `chunk_id in _known_ids or chunk_id in seen_in_batch` before any FAISS mutation.
+
+**Verified:** `test_duplicate_chunk_id_in_same_batch_raises` (protocol + FAISS integration).
+
+## Defect 2 — Loaded Inner Index Not Validated as `IndexFlatIP`
+
+**What:** After `faiss.read_index()`, the inner index is returned as a generic `Index` SWIG proxy — `isinstance(loaded.index, faiss.IndexFlatIP)` fails even for valid indexes saved from `IndexIDMap2(IndexFlatIP)`.
+
+**Why it mattered:** A corrupt or wrong-type index file could load without detecting structural incompatibility with the approved inner-product design.
+
+**Fix:** Added `faiss.downcast_index(loaded.index)` validation in `load()`; raise `VectorStoreLoadError` if inner structure is not `IndexFlatIP`.
+
+**Verified:** `test_loaded_index_validates_id_map_flat_ip_structure`; all persistence tests still pass.
+
+## Manual Smoke Test (Outside pytest)
+
+Executed with temporary path (cleaned up afterward):
+
+```powershell
+# Sequence: add → search → save → new instance → load → search → remove → save → new instance → load → verify
+```
+
+| Field | Result |
+|-------|--------|
+| Dimensions | 4 |
+| IDs added | `[10, 20, 30]` |
+| Before save | `[(10, 1.0), (30, 0.993884), (20, 0.0)]` |
+| After reload | Identical IDs, ordering, scores (delta `[0.0, 0.0, 0.0]`) |
+| Removed count | 1 (ID 10) |
+| Final count | 2 |
+| After removal IDs | `[30, 20]` |
+| Default index untouched | `data/faiss/chunk_index.faiss` did not exist before or after |
+
+## Test Verification
+
+### Targeted vector-store unit tests
+
+```powershell
+pytest tests/test_vector_store_factory.py tests/test_vector_store_protocol.py -q
+```
+
+**Result:** 16 passed in ~30s
+
+### Full default suite
+
+```powershell
+pytest tests/ -q
+```
+
+**Result:** 72 passed, 22 skipped, 3 pre-existing warnings in ~51s
+
+(22 skipped = 20 FAISS integration + 2 embedding integration)
+
+### FAISS integration only
+
+```powershell
+$env:RUN_FAISS_INTEGRATION='1'
+pytest tests/test_faiss_vector_store.py -q
+```
+
+**Result:** 20 passed in ~0.3s
+
+### Full suite with FAISS integration
+
+```powershell
+$env:RUN_FAISS_INTEGRATION='1'
+pytest tests/ -q
+```
+
+**Result:** 92 passed, 2 skipped (embedding integration only), 3 pre-existing warnings in ~47s
+
+## Persistence Invariant Verified
+
+After `add()` → `save()` → new `FaissVectorStore` → `load()` → `search()`:
+
+- Identical chunk IDs
+- Identical neighbor ordering
+- Scores within `1e-5` tolerance
+
+Test: `test_persistence_invariant_across_reload`
+
+## Known Version 1 Limitations
+
+- Single-process RLock; multi-worker deployments each hold independent index copies
+- Explicit `save()` required — no auto-save on mutation
+- Ownership pre-filtering not in VectorStore (Phase 4E)
+- Index rebuild from `chunk_text` designed but not implemented (Phase 4F)
+- `search(k<=0)` returns `[]` without acquiring lock (no index access — acceptable)
+
+## Not in Phase 4C Scope (Confirmed)
+
+No upload embedding integration, semantic retrieval API, RAG, routers, migrations, model/schema changes, `app/dependencies.py` wiring, or Phase 4D orchestration.
 
 ---

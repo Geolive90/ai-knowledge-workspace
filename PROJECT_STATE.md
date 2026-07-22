@@ -204,6 +204,43 @@ The exact structure must be inspected before any AI assistant makes changes.
 - Automated tests: **56 passed**, 2 skipped (integration), 0 failed, 3 pre-existing warnings
 - No FAISS, upload integration, search, persistence, routers, or `app/dependencies.py` changes
 
+### Embeddings — Phase 4C (Vector Store / FAISS)
+
+- **Status:** complete, verified, and approved (July 22, 2026)
+- Provider-independent `VectorStore` Protocol with `FaissVectorStore` as sole Version 1 implementation
+- FAISS structure: `IndexIDMap2(IndexFlatIP)`; vectors keyed by `chunk_id`
+- Cosine-style similarity via L2-normalized vectors and inner-product search
+- Duplicate `chunk_id` rejected (including within same incoming batch)
+- Dimensions supplied by factory via `EmbeddingProvider.dimensions` — no `VECTOR_STORE_DIMENSIONS` config
+- Core vector-store abstraction and FAISS implementation remain embedding-independent; only `factory.py` lazy-imports embedding
+- Explicit `save()` / `load()` lifecycle; atomic save via temp file + replacement
+- Missing index file → empty valid store; corrupt/wrong-dimension/incompatible structure → `VectorStoreLoadError`
+- Per-instance `RLock`; Version 1 single-process limitation documented
+- Configuration: `VECTOR_STORE_PROVIDER`, `FAISS_INDEX_PATH`
+- Dependencies pinned: `faiss-cpu==1.14.3` (verified on Windows Python 3.10.5, NumPy 2.2.6)
+- **Source files created (6):**
+  - `app/services/vector_store/__init__.py`
+  - `app/services/vector_store/exceptions.py`
+  - `app/services/vector_store/provider.py`
+  - `app/services/vector_store/factory.py`
+  - `app/services/vector_store/providers/__init__.py`
+  - `app/services/vector_store/providers/faiss.py`
+- **Test files created (3):**
+  - `tests/test_vector_store_factory.py`
+  - `tests/test_vector_store_protocol.py`
+  - `tests/test_faiss_vector_store.py`
+- **Modified:** `app/config.py`, `requirements.txt`, `tests/conftest.py`
+- **Total:** 12 files (9 created + 3 modified)
+- Manual smoke test passed (add → search → save → reload → remove → save → reload)
+- Persistence invariant verified (IDs, ordering, scores within tolerance)
+- Defects found and fixed: same-batch duplicate-ID overwrite; loaded inner-index structure validation
+- **Final test results:**
+  - Targeted vector-store unit: **16 passed**
+  - Full default suite: **72 passed**, 22 skipped, 3 pre-existing warnings
+  - FAISS integration only (`RUN_FAISS_INTEGRATION=1`): **20 passed**
+  - Full suite with FAISS integration: **92 passed**, 2 skipped, 3 pre-existing warnings
+- No upload integration, retrieval orchestration, routers, migrations, models, schemas, or `app/dependencies.py` changes
+
 ### Service and Utility Foundation
 
 - Document schema created
@@ -219,23 +256,26 @@ The exact structure must be inspected before any AI assistant makes changes.
 
 Milestone:
 
-Embeddings — Phase 4B (Embedding Provider and Service)
+Embeddings — Phase 4C (Vector Store / FAISS)
 
 - **Implemented, verified, and approved:** July 22, 2026
-- **Git commit:** pending in finalization step
+- **Git commit:** pending in closeout step
 
 The milestone included:
 
-- `app/services/embedding/` package (7 files) — Protocol, service, factory, `SentenceTransformersProvider`
-- 3 new test files; `requirements.txt` with `sentence-transformers==5.6.0`
+- `app/services/vector_store/` package (6 files) — Protocol, exceptions, factory, `FaissVectorStore`
+- 3 new test files; `requirements.txt` with `faiss-cpu==1.14.3`
 - Modified `app/config.py`, `tests/conftest.py`
-- **11 new files, 2 modified files** (13 total touched)
-- Embedding unit tests: 19 passed; integration tests: 2 passed (`RUN_EMBEDDING_INTEGRATION=1`)
-- Complete default suite: **56 passed**, 2 skipped, 0 failed
-- Independent review corrections: factory cache bypass, dependency pin, deprecated dimension API
+- **9 new files, 3 modified files** (12 total touched)
+- Targeted vector-store unit tests: 16 passed
+- FAISS integration tests: 20 passed (`RUN_FAISS_INTEGRATION=1`)
+- Complete default suite: **72 passed**, 22 skipped
+- Complete suite with FAISS: **92 passed**, 2 skipped
+- Defects corrected: same-batch duplicate-ID rejection; loaded-index inner FlatIP validation
 
 Previous verified milestones:
 
+- Embeddings — Phase 4B (Embedding Provider and Service) — July 22, 2026
 - Embeddings — Phase 4A (Embedding Metadata Schema) — July 22, 2026
 - Document Chunking — Phase 3 (Upload Orchestration) — July 22, 2026
 - Document Chunking — Phase 2 (Custom Chunking Engine) — July 21–22, 2026
@@ -249,18 +289,19 @@ Previous verified milestones:
 
 Current area of work:
 
-**Phase 4C — VectorStore abstraction and FAISS implementation** — next planned milestone after Phase 4B commit.
+**Phase 4D — Upload pipeline integration (atomic embed + index)** — next planned milestone; **not started**.
 
 Repository state:
 
 - Document Chunking **Phases 1–3:** complete, verified, and approved
 - Embeddings **Phase 4A:** metadata schema in place (`chunk_embeddings`)
 - Embeddings **Phase 4B:** text-to-vector service layer complete — `EmbeddingService` + `SentenceTransformersProvider`
+- Embeddings **Phase 4C:** FAISS vector storage layer complete — `VectorStore` + `FaissVectorStore`
 - Upload persists normalized `extracted_text` and chunk rows atomically (unchanged)
-- No FAISS vector storage, upload embedding integration, or semantic search yet
-- Vectors will be stored in FAISS only (Version 1 design); `chunk_embeddings` holds metadata only
+- No upload embedding integration, semantic search, or RAG yet
+- Vectors stored in FAISS only (Version 1); `chunk_embeddings` holds metadata only
 
-See `ARCHITECTURE.md` for embedding architecture and invariants.
+See `ARCHITECTURE.md` for embedding and vector-store architecture and invariants.
 
 ---
 
@@ -268,10 +309,9 @@ See `ARCHITECTURE.md` for embedding architecture and invariants.
 
 The expected implementation sequence is:
 
-1. **Phase 4C — VectorStore abstraction and FAISS implementation** — next after Phase 4B commit
-2. Phase 4D — Upload pipeline integration (atomic embed + index)
-3. Phase 4E — Semantic retrieval and search API
-4. Phase 4F — Deletion consistency and index rebuild
+1. **Phase 4D — Upload pipeline integration (atomic embed + index)** — next; not started
+2. Phase 4E — Semantic retrieval and search API
+3. Phase 4F — Deletion consistency and index rebuild
 5. Add question-answering endpoint.
 6. Add grounded AI responses.
 7. Add citations.
@@ -339,8 +379,15 @@ Areas still requiring attention include:
 
 - Extracted text **is persisted** on upload in `documents.extracted_text` (nullable for legacy rows).
 - Upload normalizes extracted text at orchestration and persists chunk rows atomically (Phase 3).
-- Embedding **metadata schema** exists (`chunk_embeddings`, Phase 4A); **text-to-vector service** exists (Phase 4B)
-- FAISS vector storage, upload embedding integration, semantic retrieval, and Q&A are unfinished.
+- Embedding **metadata schema** exists (`chunk_embeddings`, Phase 4A); **text-to-vector service** exists (Phase 4B); **FAISS vector storage** exists (Phase 4C)
+- Upload embedding integration, semantic retrieval, and Q&A are unfinished.
+
+### Phase 4C Known Version 1 Limitations
+
+- Single-process RLock; not safe for concurrent multi-worker index sharing without external coordination
+- Explicit `save()` required after mutations — no auto-save
+- Ownership pre-filtering not in VectorStore — deferred to Phase 4E retrieval layer
+- Index recovery from `chunk_text` designed but not implemented (Phase 4F)
 
 ### Phase 4A Non-Blocking Observations (Recorded at Review)
 
@@ -363,7 +410,7 @@ Documents uploaded before Phase 3 may have zero `document_chunks` rows. This is 
 
 ### Dependencies
 
-`02-Projects/backend/requirements.txt` pins `sentence-transformers==5.6.0` (Phase 4B). This is **not** a complete backend dependency manifest — FastAPI, SQLAlchemy, torch (2.13.0 installed transitively), and other runtime packages remain in `.venv` only.
+`02-Projects/backend/requirements.txt` pins `sentence-transformers==5.6.0` (Phase 4B) and `faiss-cpu==1.14.3` (Phase 4C). This is **not** a complete backend dependency manifest — FastAPI, SQLAlchemy, torch (2.13.0 installed transitively), and other runtime packages remain in `.venv` only.
 
 ### Background Processing
 

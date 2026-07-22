@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_batch_size: int = Field(default=32, ge=1)
 
+    vector_store_provider: str = "faiss"
+    faiss_index_path: str = "data/faiss/chunk_index.faiss"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -21,6 +24,11 @@ class Settings(BaseSettings):
     @field_validator("embedding_provider")
     @classmethod
     def normalize_embedding_provider(cls, value: str) -> str:
+        return value.strip().lower()
+
+    @field_validator("vector_store_provider")
+    @classmethod
+    def normalize_vector_store_provider(cls, value: str) -> str:
         return value.strip().lower()
 
 

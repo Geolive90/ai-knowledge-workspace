@@ -246,7 +246,7 @@ Full text stored in `documents.extracted_text`. Not exposed on list/get API sche
 | Normalized-text persistence boundary | **Established at orchestration (Phase 3)** |
 | `chunk_embeddings` metadata schema + model | **Verified and approved (Phase 4A — July 22, 2026)** |
 | `EmbeddingProvider` / `EmbeddingService` | **Verified and approved (Phase 4B — July 22, 2026)** |
-| `VectorStore` / FAISS | **Deferred (Phase 4C)** |
+| `VectorStore` / FAISS | **Verified and approved (Phase 4C — July 22, 2026)** |
 | Upload embedding integration | **Deferred (Phase 4D)** |
 | Semantic retrieval / search API | **Deferred (Phase 4E)** |
 | Chunk API endpoints | **Deferred** |
@@ -336,13 +336,14 @@ Embeddings do **not** live on `document_chunks`. Metadata is stored in `chunk_em
 | Storage | Holds |
 |---------|--------|
 | **SQLite `chunk_embeddings`** | `model_name`, `dimensions`, `created_at` (metadata only) |
-| **FAISS index file (planned Phase 4C)** | Vector data keyed by `chunk_id` |
+| **FAISS index file (Phase 4C)** | Vector data keyed by `chunk_id` |
 
 Version 1 design decisions (approved):
 
 - No `vector_blob` in SQLite — FAISS is the sole vector store in Version 1
 - Index recovery regenerates embeddings from `chunk_text`
-- `EmbeddingProvider` → `EmbeddingService` → `VectorStore` abstraction chain (Phase 4B complete through service layer)
+- `EmbeddingProvider` → `EmbeddingService` → vector generation; `VectorStore` → FAISS persistence (Phase 4C)
+- Upload orchestration wiring embed + metadata + index deferred to Phase 4D
 
 ### Embedding Service Layer (Verified — Phase 4B)
 
@@ -381,6 +382,75 @@ SentenceTransformersProvider   lazy model load, canonical model metadata
 - Default service creation reuses cached `get_embedding_provider()` — single model instance per process
 - `app/dependencies.py` not modified — FastAPI wiring deferred to Phase 4D
 
+### Vector Store Layer (Verified — Phase 4C)
+
+Phase 4C introduced a **provider-independent vector-storage layer** with FAISS as the sole Version 1 implementation. It stores embedding vectors together with enough identifier metadata to retrieve corresponding document chunks later, without persisting vectors in SQLite.
+
+**Purpose:** Accept pre-computed embedding vectors keyed by `chunk_id`, index them for nearest-neighbor search, persist the index to disk, and support removal by chunk identifier. Upload orchestration, ownership filtering, and semantic retrieval remain deferred to Phases 4D and 4E.
+
+```text
+EmbeddingProvider.dimensions
+        ↓
+Vector-store factory (one-time read at construction)
+        ↓
+FaissVectorStore(dimensions=...)
+        ↓
+IndexIDMap2(IndexFlatIP)
+```
+
+| Component | Role |
+|-----------|------|
+| **`VectorStore`** | Protocol: `add`, `search`, `remove_by_chunk_ids`, `clear`, `save`, `load`, `dimensions`, `count` |
+| **`VectorAddItem`** | Frozen dataclass: `chunk_id`, `vector` |
+| **`VectorSearchResult`** | Frozen dataclass: `chunk_id`, `score` (inner product = cosine similarity on normalized vectors) |
+| **`FaissVectorStore`** | Only concrete implementation; `IndexIDMap2(IndexFlatIP)`; L2-normalizes vectors on add and search |
+| **Factory** | `create_vector_store`, `get_vector_store` (cached), `clear_vector_store_caches()` |
+
+**Configuration (Phase 4C):**
+
+| Setting | Env var | Default |
+|---------|---------|---------|
+| Provider | `VECTOR_STORE_PROVIDER` | `faiss` (only supported value) |
+| Index path | `FAISS_INDEX_PATH` | `data/faiss/chunk_index.faiss` |
+
+**Dimension supply:** There is **no** `VECTOR_STORE_DIMENSIONS` configuration. The factory reads `EmbeddingProvider.dimensions` once when `dimensions` is not supplied explicitly (tests inject `dimensions=` directly). The core vector-store abstraction and FAISS implementation **do not import** the embedding package; only `factory.py` uses an approved lazy import.
+
+**Identifier strategy:**
+
+- **`chunk_id`** (`document_chunks.id`) is the persistent vector identifier in FAISS via `IndexIDMap2`
+- FAISS internal sequential IDs are opaque; never exposed to callers
+- `document_id`, `user_id`, and chunk text remain in SQLite only
+
+**Similarity strategy:**
+
+- Cosine-style similarity via L2-normalized vectors and inner-product search (`IndexFlatIP`)
+- Normalization occurs in `FaissVectorStore` on add and search (idempotent if provider already normalized)
+- Higher `score` means more similar (range typically −1 to 1)
+
+**Duplicate-ID policy:**
+
+- `add()` rejects any `chunk_id` already in the index — **including duplicates within the same incoming batch**
+- Duplicate IDs indicate orchestration or consistency errors; Version 1 fails loudly rather than silently overwriting
+
+**Persistence lifecycle:**
+
+- **`save()`** — explicit; atomic write via temporary file (`.faiss.tmp`) followed by same-filesystem replacement
+- **`load()`** — missing index file produces an empty valid store (clears any in-memory vectors); corrupt, structurally incompatible, or wrong-dimension indexes raise `VectorStoreLoadError`
+- Loaded index structure validated: wrapper must be `IndexIDMap2`; inner index downcast must be `IndexFlatIP`
+
+**Concurrency (Version 1):**
+
+- Per-instance `threading.RLock` guards all index operations (intentionally conservative)
+- Single-process assumption; multiple workers each hold an independent in-memory index with no cross-process file locking
+- Future versions may split read/write synchronization if higher concurrency is needed
+
+**Out of scope (Phase 4C):**
+
+- Upload embedding integration (Phase 4D)
+- Ownership pre-filtering in search (Phase 4E)
+- Semantic retrieval API, RAG, routers, `app/dependencies.py` wiring
+- Storing vectors in SQLite
+
 ---
 
 ## 9. Ownership Boundary for Derived Data
@@ -390,7 +460,7 @@ All document-derived data inherits ownership through the parent document:
 - Extracted text
 - Chunks
 - Embedding metadata (`chunk_embeddings`, Phase 4A)
-- Embedding vectors in FAISS (planned Phase 4C)
+- Embedding vectors in FAISS (Phase 4C)
 - Conversations, messages, citations (future)
 
 Chunk queries must not bypass document ownership checks. Services should scope through owned `document_id` values.
@@ -401,14 +471,14 @@ Chunk queries must not bypass document ownership checks. Services should scope t
 
 | Gap | Notes |
 |-----|-------|
-| FAISS vector storage / semantic retrieval | Phase 4C–4E |
 | Upload embedding integration | Phase 4D |
+| Semantic retrieval / search API | Phase 4E |
 | Q&A / citations / conversations | Planned |
 | Frontend | Planned |
 | Production DB, object storage, deployment | Planned |
 | Alembic empty-database initialization | Pre-existing debt — must fix before Docker/CI/cloud |
-| Pinned dependency manifest | `requirements.txt` pins embedding dep only; not full backend manifest |
-| Automated integration tests beyond upload/chunking/embedding | Expanded through Phase 4B |
+| Pinned dependency manifest | `requirements.txt` pins embedding + FAISS deps; not full backend manifest |
+| Automated integration tests beyond upload/chunking/embedding/vector store | Expanded through Phase 4C |
 | Legacy document backfill | Not implemented — zero-chunk legacy rows remain valid |
 
 Chunk persistence at upload and normalized-text boundary: **resolved in Phase 3**.
@@ -416,6 +486,8 @@ Chunk persistence at upload and normalized-text boundary: **resolved in Phase 3*
 Embedding metadata schema: **resolved in Phase 4A**.
 
 Text-to-vector service layer: **resolved in Phase 4B**.
+
+FAISS vector storage layer: **resolved in Phase 4C**.
 
 ---
 
