@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import Boolean, Column, DateTime, Integer, String
+from sqlalchemy.orm import relationship
 
 from app.database.database import Base
 
@@ -15,3 +16,5 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     role = Column(String, default="user", nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    documents = relationship("Document", back_populates="owner")

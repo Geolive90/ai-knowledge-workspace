@@ -23,3 +23,12 @@ Thumbs.db
 build/
 dist/
 *.egg-info/s
+
+# Cursor workspace
+.cursor/
+
+# Runtime uploads
+02-Projects/backend/uploads/
+
+# Local development database
+ai_knowledge_workspace.db
