@@ -1146,6 +1146,177 @@ No `EmbeddingProvider`, `EmbeddingService`, `VectorStore`, FAISS, upload integra
 
 ---
 
+# Embeddings — Phase 4B (Embedding Provider and Service) — July 22, 2026
+
+## Status
+
+**Complete, verified, and approved** (July 22, 2026).
+
+## Objective
+
+Introduce the application's text-to-vector abstraction layer without adding vector storage, upload orchestration, semantic search, or RAG behavior.
+
+## Purpose
+
+Convert chunk or query text into numeric embedding vectors through a replaceable provider interface. Persistence of vectors (FAISS) and `ChunkEmbedding` metadata rows during upload remain deferred to Phases 4C and 4D.
+
+## Architecture (Repository-Proven)
+
+```text
+EmbeddingService
+    ↓ depends on
+EmbeddingProvider (Protocol)
+    ↓ implemented by
+SentenceTransformersProvider
+```
+
+Factory provides cached singletons: `get_embedding_provider()`, `get_embedding_service()`, and `clear_embedding_caches()` for tests.
+
+## Files Created (11 New Files)
+
+### Embedding package (7 files)
+
+| File | Purpose |
+|------|---------|
+| `02-Projects/backend/app/services/embedding/__init__.py` | Public exports |
+| `02-Projects/backend/app/services/embedding/exceptions.py` | Exception hierarchy |
+| `02-Projects/backend/app/services/embedding/provider.py` | `EmbeddingProvider` Protocol |
+| `02-Projects/backend/app/services/embedding/service.py` | `EmbeddingService`, `EmbeddingVector` |
+| `02-Projects/backend/app/services/embedding/factory.py` | Provider/service factory + cache |
+| `02-Projects/backend/app/services/embedding/providers/__init__.py` | Provider package |
+| `02-Projects/backend/app/services/embedding/providers/sentence_transformers.py` | `SentenceTransformersProvider` |
+
+### Tests (3 files)
+
+| File | Purpose |
+|------|---------|
+| `02-Projects/backend/tests/test_embedding_service.py` | Service unit tests (13) |
+| `02-Projects/backend/tests/test_embedding_factory.py` | Factory/config tests (6) |
+| `02-Projects/backend/tests/test_sentence_transformers_provider.py` | Opt-in integration tests (2) |
+
+### Dependency file (1 file)
+
+| File | Purpose |
+|------|---------|
+| `02-Projects/backend/requirements.txt` | Pins `sentence-transformers==5.6.0` |
+
+## Files Modified (2 Files)
+
+| File | Change |
+|------|--------|
+| `02-Projects/backend/app/config.py` | `embedding_provider`, `embedding_model`, `embedding_batch_size` |
+| `02-Projects/backend/tests/conftest.py` | Fake providers, autouse cache clearing |
+
+**Total touched:** 11 new + 2 modified = **13 files**
+
+**File count correction:** An earlier implementation report incorrectly stated "10 files under `app/services/embedding/`." The embedding package contains **7 files**, not 10.
+
+## Core Implementation Details
+
+- **`EmbeddingProvider` Protocol:** `embed_text`, `embed_texts`, `model_name`, `dimensions`
+- **`EmbeddingService`:** input validation, batching, vector count/dimension validation, provider error normalization
+- **`EmbeddingVector`:** single result type (`vector`, `model_name`, `dimensions`)
+- **`SentenceTransformersProvider`:** lazy import, lazy model load, Python lists at boundary
+- **Canonical model name:** `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions, provider-derived)
+- **Configuration:** `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, `EMBEDDING_BATCH_SIZE` only
+
+## Dependencies
+
+| Package | Version | Notes |
+|---------|---------|-------|
+| `sentence-transformers` | **5.6.0** | Pinned in `requirements.txt` |
+| `torch` | **2.13.0** | Installed transitively; **not** pinned |
+
+`requirements.txt` records only the newly managed embedding dependency. It is **not** a complete backend dependency manifest and does not guarantee full environment reproducibility.
+
+## Initial Implementation
+
+Completed without execution errors. Unit tests passed with fake providers before real-provider verification.
+
+## Independent Review — Defects Found and Corrected
+
+### 1. Factory cache bypass
+
+**Issue:** `create_embedding_service()` called `create_embedding_provider(settings)` directly, allowing two provider/model instances if both `get_embedding_provider()` and `get_embedding_service()` were used.
+
+**Fix:** Default service creation reuses cached `get_embedding_provider()` when no explicit provider or settings override is supplied.
+
+**Verified:** `get_embedding_service()._provider is get_embedding_provider()` → `True`.
+
+### 2. Dependency constraint
+
+**Issue:** `sentence-transformers>=2.2.0` was a minimum constraint, not a verified pin.
+
+**Fix:** Replaced with `sentence-transformers==5.6.0` after installation verification.
+
+### 3. Deprecated dimension API
+
+**Issue:** `get_sentence_embedding_dimension()` produced a `FutureWarning` on sentence-transformers 5.6.0.
+
+**Fix:** Provider prefers `get_embedding_dimension()` with legacy fallback.
+
+## Test Verification
+
+### Embedding unit tests
+
+```powershell
+pytest tests/test_embedding_service.py tests/test_embedding_factory.py -v
+```
+
+**Result:** 19 passed, 0 failed
+
+### Real-provider integration tests
+
+```powershell
+$env:RUN_EMBEDDING_INTEGRATION='1'
+pytest tests/test_sentence_transformers_provider.py -v
+```
+
+**Result:** 2 passed, 0 failed
+
+Verified:
+
+- Model loaded successfully
+- `model_name` = `sentence-transformers/all-MiniLM-L6-v2`
+- `dimensions` = 384
+- One text → one vector; two texts → two vectors
+- Vectors returned as Python lists of float-compatible values
+- Cached factory service and provider share the same provider instance
+
+### Complete default suite
+
+```powershell
+pytest tests/ -v
+```
+
+**Result:** 56 passed, 2 skipped (integration), 0 failed, 0 deselected, 3 pre-existing warnings
+
+## Model-Download Behavior
+
+- First real-provider integration run downloaded the model from Hugging Face (~48s)
+- Subsequent run loaded from local Hugging Face cache (~27s)
+- Windows emitted a symlink-degraded cache warning (non-blocking)
+- Unauthenticated Hub notice appeared (non-blocking)
+
+## Non-Blocking Considerations (Not Phase 4B Blockers)
+
+1. `EmbeddingVector` is frozen but its `list` remains internally mutable
+2. Integration tests could add stronger explicit batch-order assertions later
+3. `torch` is not directly pinned in `requirements.txt`
+4. `requirements.txt` is incomplete as a full project dependency manifest
+
+## Not in Phase 4B Scope (Confirmed)
+
+No FAISS, vector storage, `ChunkEmbedding` persistence, upload integration, search, RAG, LLM calls, routers, `app/dependencies.py`, `document_service.py`, database models, migrations, frontend, or OpenAI provider.
+
+## Engineering Lessons
+
+- Default service factory must reuse cached provider to avoid duplicate model loads
+- Pin exact verified dependency versions; minimum constraints are not reproducible pins
+- Phase 4B unit tests must not require network or model download; integration tests opt-in via `RUN_EMBEDDING_INTEGRATION=1`
+
+---
+
 # Historical Backfill — Environment and Workflow Details
 
 The following items supplement earlier milestones. Items marked **(owner-reported)** are not independently provable from the current repository snapshot alone.
@@ -1215,13 +1386,14 @@ The following items supplement earlier milestones. Items marked **(owner-reporte
 
 ## F. Current Alembic Head and Implementation Gap
 
-**Repository-proven code state after Phase 4A embedding metadata schema:**
+**Repository-proven code state after Phase 4B embedding provider and service:**
 
 - Models: `User`, `Document`, `DocumentChunk`, `ChunkEmbedding`
-- Services: `document_service` (includes `create_document_with_chunks()`), `text_extraction_service`, `chunking_service`
+- Services: `document_service`, `text_extraction_service`, `chunking_service`, `embedding` package (`EmbeddingService`, `SentenceTransformersProvider`)
 - Upload persists normalized `extracted_text` and chunk rows atomically via `create_document_with_chunks()`
+- Text-to-vector conversion available via `EmbeddingService`; not yet wired to upload
 - `chunk_embeddings` metadata schema in place; Alembic head `f3a1b8c45201`
-- Legacy documents may have zero chunk rows until re-uploaded
-- **Next implementation step:** Phase 4B — `EmbeddingProvider` and `EmbeddingService`
+- `requirements.txt` pins `sentence-transformers==5.6.0` only
+- **Next implementation step:** Phase 4C — `VectorStore` abstraction and FAISS implementation
 
 ---

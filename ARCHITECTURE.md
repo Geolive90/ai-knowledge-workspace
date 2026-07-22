@@ -245,7 +245,7 @@ Full text stored in `documents.extracted_text`. Not exposed on list/get API sche
 | `create_document_with_chunks()` upload orchestration | **Implemented and verified (Phase 3 — July 22, 2026)** |
 | Normalized-text persistence boundary | **Established at orchestration (Phase 3)** |
 | `chunk_embeddings` metadata schema + model | **Verified and approved (Phase 4A — July 22, 2026)** |
-| `EmbeddingProvider` / `EmbeddingService` | **Deferred (Phase 4B)** |
+| `EmbeddingProvider` / `EmbeddingService` | **Verified and approved (Phase 4B — July 22, 2026)** |
 | `VectorStore` / FAISS | **Deferred (Phase 4C)** |
 | Upload embedding integration | **Deferred (Phase 4D)** |
 | Semantic retrieval / search API | **Deferred (Phase 4E)** |
@@ -342,7 +342,44 @@ Version 1 design decisions (approved):
 
 - No `vector_blob` in SQLite — FAISS is the sole vector store in Version 1
 - Index recovery regenerates embeddings from `chunk_text`
-- `EmbeddingProvider` → `EmbeddingService` → `VectorStore` abstraction chain (Phase 4B+)
+- `EmbeddingProvider` → `EmbeddingService` → `VectorStore` abstraction chain (Phase 4B complete through service layer)
+
+### Embedding Service Layer (Verified — Phase 4B)
+
+Phase 4B introduced text-to-vector conversion **without** vector storage, upload integration, search, or RAG behavior.
+
+```text
+Application workflow (Phase 4D+)
+        ↓
+EmbeddingService          validation, batching, dimension checks
+        ↓ depends on
+EmbeddingProvider         Protocol (interface only)
+        ↓ implemented by
+SentenceTransformersProvider   lazy model load, canonical model metadata
+```
+
+| Component | Role |
+|-----------|------|
+| **`EmbeddingProvider`** | Protocol: `embed_text`, `embed_texts`, `model_name`, `dimensions` |
+| **`EmbeddingService`** | Validates input, batches by `embedding_batch_size`, validates vector count/dimensions, returns `EmbeddingVector` |
+| **`EmbeddingVector`** | Frozen dataclass: `vector`, `model_name`, `dimensions` |
+| **`SentenceTransformersProvider`** | Only concrete provider; lazy `sentence_transformers` import; model loaded once per cached instance |
+| **Factory** | `create_embedding_provider`, `get_embedding_provider` (cached), `create_embedding_service`, `get_embedding_service` (cached), `clear_embedding_caches()` |
+
+**Configuration (Phase 4B):**
+
+| Setting | Env var | Default |
+|---------|---------|---------|
+| Provider | `EMBEDDING_PROVIDER` | `sentence_transformers` (only supported value) |
+| Model | `EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` |
+| Batch size | `EMBEDDING_BATCH_SIZE` | `32` (minimum 1) |
+
+**Design decisions:**
+
+- Dimensions are **provider-derived**, not configured
+- Canonical `model_name` for metadata: `sentence-transformers/all-MiniLM-L6-v2` (loads via short name `all-MiniLM-L6-v2`)
+- Default service creation reuses cached `get_embedding_provider()` — single model instance per process
+- `app/dependencies.py` not modified — FastAPI wiring deferred to Phase 4D
 
 ---
 
@@ -364,19 +401,21 @@ Chunk queries must not bypass document ownership checks. Services should scope t
 
 | Gap | Notes |
 |-----|-------|
-| `EmbeddingProvider` / `EmbeddingService` | Phase 4B — metadata schema ready |
 | FAISS vector storage / semantic retrieval | Phase 4C–4E |
+| Upload embedding integration | Phase 4D |
 | Q&A / citations / conversations | Planned |
 | Frontend | Planned |
 | Production DB, object storage, deployment | Planned |
 | Alembic empty-database initialization | Pre-existing debt — must fix before Docker/CI/cloud |
-| Pinned dependency manifest | `requirements.txt` empty at repo root |
-| Automated integration tests beyond upload/chunking/embedding schema | Expanded through Phase 4A; broader suite still planned |
+| Pinned dependency manifest | `requirements.txt` pins embedding dep only; not full backend manifest |
+| Automated integration tests beyond upload/chunking/embedding | Expanded through Phase 4B |
 | Legacy document backfill | Not implemented — zero-chunk legacy rows remain valid |
 
 Chunk persistence at upload and normalized-text boundary: **resolved in Phase 3**.
 
 Embedding metadata schema: **resolved in Phase 4A**.
+
+Text-to-vector service layer: **resolved in Phase 4B**.
 
 ---
 

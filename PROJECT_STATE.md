@@ -192,6 +192,18 @@ The exact structure must be inspected before any AI assistant makes changes.
 - Automated tests: **37 passed**, 0 failed, 3 pre-existing warnings (8 new Phase 4A tests)
 - No Phase 4B work, no new dependencies, no upload pipeline changes
 
+### Embeddings — Phase 4B (Embedding Provider and Service)
+
+- **Status:** complete, verified, and approved (July 22, 2026)
+- Text-to-vector abstraction: `EmbeddingProvider` Protocol → `EmbeddingService` → `SentenceTransformersProvider`
+- Single result type: `EmbeddingVector` (`vector`, `model_name`, `dimensions`)
+- Factory with cached `get_embedding_provider()` / `get_embedding_service()` and `clear_embedding_caches()`
+- Configuration: `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, `EMBEDDING_BATCH_SIZE`
+- Dependency pinned: `sentence-transformers==5.6.0` in `02-Projects/backend/requirements.txt`
+- Default model: `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions, provider-derived)
+- Automated tests: **56 passed**, 2 skipped (integration), 0 failed, 3 pre-existing warnings
+- No FAISS, upload integration, search, persistence, routers, or `app/dependencies.py` changes
+
 ### Service and Utility Foundation
 
 - Document schema created
@@ -207,23 +219,24 @@ The exact structure must be inspected before any AI assistant makes changes.
 
 Milestone:
 
-Embeddings — Phase 4A (Embedding Metadata Schema)
+Embeddings — Phase 4B (Embedding Provider and Service)
 
 - **Implemented, verified, and approved:** July 22, 2026
-- **Git commit:** pending
+- **Git commit:** pending in finalization step
 
 The milestone included:
 
-- `app/models/chunk_embedding.py` — `ChunkEmbedding` ORM (metadata only)
-- Alembic migration `f3a1b8c45201` (down revision `e8c5b6a30293`)
-- `DocumentChunk.embedding` one-to-one relationship
-- 8 new tests in `tests/test_chunk_embedding_model.py`
-- **37 automated tests passing** (29 prior + 8 Phase 4A), 0 failed, 3 pre-existing warnings
-- Development database at `f3a1b8c45201 (head)`
-- No Phase 4B services, dependencies, or upload changes
+- `app/services/embedding/` package (7 files) — Protocol, service, factory, `SentenceTransformersProvider`
+- 3 new test files; `requirements.txt` with `sentence-transformers==5.6.0`
+- Modified `app/config.py`, `tests/conftest.py`
+- **11 new files, 2 modified files** (13 total touched)
+- Embedding unit tests: 19 passed; integration tests: 2 passed (`RUN_EMBEDDING_INTEGRATION=1`)
+- Complete default suite: **56 passed**, 2 skipped, 0 failed
+- Independent review corrections: factory cache bypass, dependency pin, deprecated dimension API
 
 Previous verified milestones:
 
+- Embeddings — Phase 4A (Embedding Metadata Schema) — July 22, 2026
 - Document Chunking — Phase 3 (Upload Orchestration) — July 22, 2026
 - Document Chunking — Phase 2 (Custom Chunking Engine) — July 21–22, 2026
 - Document Chunking — Phase 1 (Schema) — July 21, 2026
@@ -236,18 +249,18 @@ Previous verified milestones:
 
 Current area of work:
 
-**Phase 4B — EmbeddingProvider and EmbeddingService** — next planned milestone after Phase 4A commit.
+**Phase 4C — VectorStore abstraction and FAISS implementation** — next planned milestone after Phase 4B commit.
 
 Repository state:
 
 - Document Chunking **Phases 1–3:** complete, verified, and approved
-- Embeddings **Phase 4A:** complete, verified, and approved — `chunk_embeddings` metadata schema in place
-- Upload persists normalized `extracted_text` and chunk rows atomically (unchanged by Phase 4A)
-- Legacy documents may have zero chunk rows until re-uploaded
-- No embedding generation, vector storage (FAISS), semantic search, or chunk API endpoints yet
-- Vectors stored in FAISS only (Version 1 design); `chunk_embeddings` holds metadata only
+- Embeddings **Phase 4A:** metadata schema in place (`chunk_embeddings`)
+- Embeddings **Phase 4B:** text-to-vector service layer complete — `EmbeddingService` + `SentenceTransformersProvider`
+- Upload persists normalized `extracted_text` and chunk rows atomically (unchanged)
+- No FAISS vector storage, upload embedding integration, or semantic search yet
+- Vectors will be stored in FAISS only (Version 1 design); `chunk_embeddings` holds metadata only
 
-See `ARCHITECTURE.md` for orchestration contract, embedding architecture, and invariants.
+See `ARCHITECTURE.md` for embedding architecture and invariants.
 
 ---
 
@@ -255,21 +268,20 @@ See `ARCHITECTURE.md` for orchestration contract, embedding architecture, and in
 
 The expected implementation sequence is:
 
-1. **Phase 4B — EmbeddingProvider and EmbeddingService** — next after Phase 4A commit
-2. Phase 4C — VectorStore abstraction and FAISS implementation
-3. Phase 4D — Upload pipeline integration (atomic embed + index)
-4. Phase 4E — Semantic retrieval and search API
-5. Phase 4F — Deletion consistency and index rebuild
-6. Add question-answering endpoint.
-7. Add grounded AI responses.
-8. Add citations.
-9. Add conversation and message history.
-10. Add frontend.
-11. Add Docker configuration.
-12. Add production database migration.
-13. Add cloud file storage.
-14. Add deployment.
-15. Add monitoring, logging, and security hardening.
+1. **Phase 4C — VectorStore abstraction and FAISS implementation** — next after Phase 4B commit
+2. Phase 4D — Upload pipeline integration (atomic embed + index)
+3. Phase 4E — Semantic retrieval and search API
+4. Phase 4F — Deletion consistency and index rebuild
+5. Add question-answering endpoint.
+6. Add grounded AI responses.
+7. Add citations.
+8. Add conversation and message history.
+9. Add frontend.
+10. Add Docker configuration.
+11. Add production database migration.
+12. Add cloud file storage.
+13. Add deployment.
+14. Add monitoring, logging, and security hardening.
 
 The sequence may be adjusted after inspecting the current implementation.
 
@@ -327,7 +339,8 @@ Areas still requiring attention include:
 
 - Extracted text **is persisted** on upload in `documents.extracted_text` (nullable for legacy rows).
 - Upload normalizes extracted text at orchestration and persists chunk rows atomically (Phase 3).
-- Embedding **metadata schema** exists (`chunk_embeddings`, Phase 4A); embedding generation, FAISS vector storage, semantic retrieval, and Q&A are unfinished.
+- Embedding **metadata schema** exists (`chunk_embeddings`, Phase 4A); **text-to-vector service** exists (Phase 4B)
+- FAISS vector storage, upload embedding integration, semantic retrieval, and Q&A are unfinished.
 
 ### Phase 4A Non-Blocking Observations (Recorded at Review)
 
@@ -350,7 +363,7 @@ Documents uploaded before Phase 3 may have zero `document_chunks` rows. This is 
 
 ### Dependencies
 
-Root `requirements.txt` is empty (repository-proven). Runtime packages exist in `.venv` (FastAPI, SQLAlchemy, pypdf, python-docx, pytest for chunking tests, etc.) but are not fully pinned in the repository manifest.
+`02-Projects/backend/requirements.txt` pins `sentence-transformers==5.6.0` (Phase 4B). This is **not** a complete backend dependency manifest — FastAPI, SQLAlchemy, torch (2.13.0 installed transitively), and other runtime packages remain in `.venv` only.
 
 ### Background Processing
 
