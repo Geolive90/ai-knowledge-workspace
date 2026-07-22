@@ -160,7 +160,7 @@ The exact structure must be inspected before any AI assistant makes changes.
 ### Document Chunking — Phase 1 (Schema)
 
 - **Status:** complete and approved
-- `document_chunks` table defined via migration `e8c5b6a30293` (head when applied)
+- `document_chunks` table defined via migration `e8c5b6a30293`
 - `DocumentChunk` model with FK `ON DELETE CASCADE`, unique `(document_id, chunk_index)`
 - `Document.chunks` relationship with ORM cascade
 - SQLite application connections enforce `PRAGMA foreign_keys=ON` via engine connect listener
@@ -178,7 +178,19 @@ The exact structure must be inspected before any AI assistant makes changes.
 - Upload calls `create_document_with_chunks()` — normalizes text, persists document + chunks in one transaction
 - `extracted_character_count` and `text_preview` derived from persisted `document.extracted_text`
 - Legacy `create_document()` retained for non-upload paths/tests; upload cannot bypass chunk creation
-- Automated tests: 29 total (13 Phase 2 + 10 service + 6 integration), all passing
+- Automated tests: 29 total (13 Phase 2 + 10 service + 6 integration), all passing at Phase 3 completion
+
+### Embeddings — Phase 4A (Embedding Metadata Schema)
+
+- **Status:** complete, verified, and approved (July 22, 2026)
+- `chunk_embeddings` table defined via migration `f3a1b8c45201` (Alembic head)
+- `ChunkEmbedding` model in `app/models/chunk_embedding.py` — metadata only; no `vector_blob`
+- Columns: `id`, `chunk_id`, `model_name`, `dimensions`, `created_at`
+- One-to-one: `DocumentChunk.embedding` ↔ `ChunkEmbedding.chunk` (`uselist=False`, `back_populates`)
+- Cascade chain: `Document` → `DocumentChunk` → `ChunkEmbedding` (FK `ON DELETE CASCADE`)
+- Development database verified at `f3a1b8c45201 (head)`
+- Automated tests: **37 passed**, 0 failed, 3 pre-existing warnings (8 new Phase 4A tests)
+- No Phase 4B work, no new dependencies, no upload pipeline changes
 
 ### Service and Utility Foundation
 
@@ -195,21 +207,24 @@ The exact structure must be inspected before any AI assistant makes changes.
 
 Milestone:
 
-Document Chunking — Phase 3 (Upload Orchestration)
+Embeddings — Phase 4A (Embedding Metadata Schema)
 
 - **Implemented, verified, and approved:** July 22, 2026
-- **Git commit:** pending in finalization step
+- **Git commit:** pending
 
 The milestone included:
 
-- `create_document_with_chunks()` in `document_service.py`
-- Upload router integration with normalized-text response fields
-- Atomic document + chunk persistence in one transaction
-- 29 automated tests passing (13 Phase 2 regression + 16 Phase 3)
-- No schema changes, no new migration
+- `app/models/chunk_embedding.py` — `ChunkEmbedding` ORM (metadata only)
+- Alembic migration `f3a1b8c45201` (down revision `e8c5b6a30293`)
+- `DocumentChunk.embedding` one-to-one relationship
+- 8 new tests in `tests/test_chunk_embedding_model.py`
+- **37 automated tests passing** (29 prior + 8 Phase 4A), 0 failed, 3 pre-existing warnings
+- Development database at `f3a1b8c45201 (head)`
+- No Phase 4B services, dependencies, or upload changes
 
 Previous verified milestones:
 
+- Document Chunking — Phase 3 (Upload Orchestration) — July 22, 2026
 - Document Chunking — Phase 2 (Custom Chunking Engine) — July 21–22, 2026
 - Document Chunking — Phase 1 (Schema) — July 21, 2026
 - Persistent Extracted Text Storage — July 20–21, 2026
@@ -221,16 +236,18 @@ Previous verified milestones:
 
 Current area of work:
 
-**Embedding generation** — next planned milestone after Phase 3 review and Git commit.
+**Phase 4B — EmbeddingProvider and EmbeddingService** — next planned milestone after Phase 4A commit.
 
 Repository state:
 
 - Document Chunking **Phases 1–3:** complete, verified, and approved
-- Upload persists normalized `extracted_text` and chunk rows atomically
+- Embeddings **Phase 4A:** complete, verified, and approved — `chunk_embeddings` metadata schema in place
+- Upload persists normalized `extracted_text` and chunk rows atomically (unchanged by Phase 4A)
 - Legacy documents may have zero chunk rows until re-uploaded
-- No embedding, vector storage, or chunk API endpoints yet
+- No embedding generation, vector storage (FAISS), semantic search, or chunk API endpoints yet
+- Vectors stored in FAISS only (Version 1 design); `chunk_embeddings` holds metadata only
 
-See `ARCHITECTURE.md` for orchestration contract and invariants.
+See `ARCHITECTURE.md` for orchestration contract, embedding architecture, and invariants.
 
 ---
 
@@ -238,19 +255,21 @@ See `ARCHITECTURE.md` for orchestration contract and invariants.
 
 The expected implementation sequence is:
 
-1. **Embedding generation** — next after Phase 3 independent review
-2. Add vector storage.
-3. Add semantic retrieval.
-4. Add question-answering endpoint.
-5. Add grounded AI responses.
-6. Add citations.
-7. Add conversation and message history.
-8. Add frontend.
-9. Add Docker configuration.
-10. Add production database migration.
-11. Add cloud file storage.
-12. Add deployment.
-13. Add monitoring, logging, and security hardening.
+1. **Phase 4B — EmbeddingProvider and EmbeddingService** — next after Phase 4A commit
+2. Phase 4C — VectorStore abstraction and FAISS implementation
+3. Phase 4D — Upload pipeline integration (atomic embed + index)
+4. Phase 4E — Semantic retrieval and search API
+5. Phase 4F — Deletion consistency and index rebuild
+6. Add question-answering endpoint.
+7. Add grounded AI responses.
+8. Add citations.
+9. Add conversation and message history.
+10. Add frontend.
+11. Add Docker configuration.
+12. Add production database migration.
+13. Add cloud file storage.
+14. Add deployment.
+15. Add monitoring, logging, and security hardening.
 
 The sequence may be adjusted after inspecting the current implementation.
 
@@ -265,6 +284,14 @@ The following limitations are currently known:
 SQLite is being used for local development.
 
 A production version should migrate to PostgreSQL.
+
+### Alembic Migration Chain — Empty Database Initialization
+
+The complete Alembic chain **cannot initialize an empty database** because revision `bdc259e18150` assumes an existing `users` table (`ALTER TABLE users ADD COLUMN role`). This is **pre-existing technical debt**, not introduced by Phase 4A.
+
+**Must be repaired before:** Docker deployment, CI fresh-database testing, or cloud deployment.
+
+Phase 4A migration tests work around this by stamping at `e8c5b6a30293` and upgrading only the new revision. See `BUILD_LOG.md` for details.
 
 ### File Storage
 
@@ -300,7 +327,13 @@ Areas still requiring attention include:
 
 - Extracted text **is persisted** on upload in `documents.extracted_text` (nullable for legacy rows).
 - Upload normalizes extracted text at orchestration and persists chunk rows atomically (Phase 3).
-- Embeddings, vector storage, semantic retrieval, and Q&A are unfinished.
+- Embedding **metadata schema** exists (`chunk_embeddings`, Phase 4A); embedding generation, FAISS vector storage, semantic retrieval, and Q&A are unfinished.
+
+### Phase 4A Non-Blocking Observations (Recorded at Review)
+
+- Redundant non-unique index on `chunk_embeddings.id` (PK already indexed; matches `document_chunks` precedent).
+- Duplicate uniqueness/index structures on `chunk_embeddings.chunk_id` (`UniqueConstraint` plus unique index).
+- Cascade tests confirm final deletion behavior but do not isolate raw SQL `ON DELETE CASCADE` from ORM `delete-orphan`.
 
 ### Chunking Test Gaps (Future Additions, Not Current Defects)
 

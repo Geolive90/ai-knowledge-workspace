@@ -1000,6 +1000,152 @@ No embeddings, vector DB, background jobs, backfill, new migration, or unrelated
 
 ---
 
+# Embeddings — Phase 4A (Embedding Metadata Schema) — July 22, 2026
+
+## Status
+
+**Complete, verified, and approved** (July 22, 2026).
+
+## Objective
+
+Add `chunk_embeddings` table and `ChunkEmbedding` ORM for embedding metadata only. Vectors remain in FAISS (Version 1, Phase 4C+). No embedding services, upload changes, or new dependencies.
+
+## Design Decisions (Approved)
+
+| Decision | Verdict |
+|----------|---------|
+| Store vectors in SQLite (`vector_blob`) | **Rejected** |
+| Metadata-only table referencing `chunk_id` | **Approved** |
+| FAISS as sole Version 1 vector store | **Approved** |
+| Index recovery from `chunk_text` | **Approved** |
+| One-to-one `DocumentChunk` ↔ `ChunkEmbedding` | **Approved** |
+
+## Files Created (Repository-Proven)
+
+| File | Purpose |
+|------|---------|
+| `02-Projects/backend/app/models/chunk_embedding.py` | `ChunkEmbedding` ORM |
+| `02-Projects/backend/alembic/versions/f3a1b8c45201_create_chunk_embeddings_table.py` | Migration |
+| `02-Projects/backend/tests/test_chunk_embedding_model.py` | Phase 4A tests (8 tests) |
+
+## Files Modified (Repository-Proven)
+
+| File | Change |
+|------|--------|
+| `02-Projects/backend/app/models/document_chunk.py` | Added `embedding` one-to-one relationship |
+| `02-Projects/backend/app/models/__init__.py` | Export `ChunkEmbedding` |
+| `02-Projects/backend/tests/conftest.py` | Import `ChunkEmbedding` for test metadata |
+
+## Files Not Modified (Confirmed)
+
+- Upload pipeline, routers, services, config, dependencies
+- No `EmbeddingProvider`, `EmbeddingService`, or `VectorStore`
+- No new packages installed
+
+## Schema — `chunk_embeddings`
+
+| Column | Type | Constraints |
+|--------|------|-------------|
+| `id` | Integer | PK, indexed |
+| `chunk_id` | Integer | FK → `document_chunks.id` ON DELETE CASCADE, NOT NULL, UNIQUE, indexed |
+| `model_name` | String(128) | NOT NULL |
+| `dimensions` | Integer | NOT NULL |
+| `created_at` | DateTime | NOT NULL, default UTC (application-level) |
+
+**Metadata only** — no `vector_blob`.
+
+## Relationships
+
+- `DocumentChunk.embedding` → one-to-one, `uselist=False`, `back_populates="chunk"`, `cascade="all, delete-orphan"`
+- `ChunkEmbedding.chunk` → `back_populates="embedding"`
+
+## Cascade Chain
+
+```text
+DELETE Document → CASCADE DocumentChunk → CASCADE ChunkEmbedding
+```
+
+## Migration (Repository-Proven)
+
+| Field | Value |
+|-------|--------|
+| Revision | `f3a1b8c45201` |
+| Down revision | `e8c5b6a30293` |
+| Creates | `chunk_embeddings` with FK ON DELETE CASCADE, unique `chunk_id`, indexes |
+
+## Migration Verification
+
+### Development database
+
+```text
+alembic current
+```
+
+**Result:** `f3a1b8c45201 (head)`
+
+```text
+alembic heads
+```
+
+**Result:** `f3a1b8c45201 (head)` — single head, no branch conflict.
+
+### Automated migration test
+
+`test_migration_upgrade_and_downgrade` stamps at `e8c5b6a30293`, upgrades to head, verifies table/columns via raw `sqlite3`, downgrades to `e8c5b6a30293`, confirms table removed.
+
+**Note:** Full `alembic upgrade head` from an **empty** database fails at `bdc259e18150` (`ALTER TABLE users ADD COLUMN role`) because no `users` table exists. This is **pre-existing technical debt** — not introduced by Phase 4A. Must be repaired before Docker deployment, CI fresh-database testing, or cloud deployment.
+
+## Test Verification (Independently Re-Verified — July 22, 2026)
+
+Command:
+
+```powershell
+Set-Location C:\Projects\AI-Knowledge-Workspace\02-Projects\backend
+& C:\Projects\AI-Knowledge-Workspace\.venv\Scripts\python.exe -m pytest tests/ -v --tb=short
+```
+
+**Result:** 37 passed, 0 failed, 3 pre-existing warnings in ~20s.
+
+Breakdown:
+
+- Phase 4A (`test_chunk_embedding_model.py`): 8 passed
+- Phase 2 regression: 13 passed
+- Phase 3 service: 10 passed
+- Phase 3 integration: 6 passed
+
+### Phase 4A test coverage
+
+1. `ChunkEmbedding` persisted for a chunk
+2. One-to-one relationship from chunk → embedding
+3. One-to-one relationship from embedding → chunk
+4. Second embedding for same chunk rejected (`IntegrityError`)
+5. Deleting chunk removes embedding
+6. Deleting document cascades through chunks to embeddings
+7. Migration module structurally valid (revision chain, callable upgrade/downgrade)
+8. Migration upgrade and downgrade (Alembic + raw sqlite3 verification)
+
+## Final Read-Only Review Findings (Non-Blocking)
+
+Recorded at Phase 4A pre-commit review:
+
+1. **Redundant index on `chunk_embeddings.id`** — non-unique index duplicates PK index; matches `document_chunks` precedent (`ix_document_chunks_id`).
+2. **Duplicate uniqueness on `chunk_id`** — migration defines both `UniqueConstraint` and a separate unique index; functionally correct, structurally redundant.
+3. **Cascade tests confirm final behavior only** — tests use ORM `delete()`; they do not isolate raw SQL `ON DELETE CASCADE` from ORM `delete-orphan`. FK definitions are correct; optional raw-SQL test deferred.
+
+**Recommendation:** Approve Phase 4A as-is; observations are cosmetic or test-coverage gaps, not blockers.
+
+## Engineering Lessons
+
+- Embedding metadata belongs in a separate table referencing `chunk_id`, not on `document_chunks`.
+- Phase 4A migration tests must stamp at a prior head (`e8c5b6a30293`) because the full Alembic chain cannot bootstrap from empty.
+- SQLite FK enforcement (`PRAGMA foreign_keys=ON`) is required in both application engine and test fixtures for cascade tests to be meaningful.
+
+## Not in Phase 4A Scope (Confirmed)
+
+No `EmbeddingProvider`, `EmbeddingService`, `VectorStore`, FAISS, upload integration, search API, new dependencies, or Phase 4B+ work.
+
+---
+
 # Historical Backfill — Environment and Workflow Details
 
 The following items supplement earlier milestones. Items marked **(owner-reported)** are not independently provable from the current repository snapshot alone.
@@ -1035,10 +1181,13 @@ The following items supplement earlier milestones. Items marked **(owner-reporte
 
 | Order | Revision | Description |
 |-------|----------|-------------|
-| 1 | `bdc259e18150` | Add `users.role` (default `user`) |
+| 1 | `bdc259e18150` | Add `users.role` (default `user`) — **requires pre-existing `users` table** |
 | 2 | `c4a8f2e19061` | Add `documents.user_id` FK, index; non-destructive backfill rules |
 | 3 | `d7b3a4f29182` | Add nullable `documents.extracted_text` |
 | 4 | `e8c5b6a30293` | Create `document_chunks` table |
+| 5 | `f3a1b8c45201` | Create `chunk_embeddings` table (metadata only) |
+
+**Pre-existing technical debt:** The chain cannot initialize an empty database (revision 1 assumes existing tables). Must be repaired before Docker, CI fresh-database testing, or cloud deployment.
 
 **Repository-proven:** `alembic/env.py` imports `Base` and `from app.models import *`.
 
@@ -1066,12 +1215,13 @@ The following items supplement earlier milestones. Items marked **(owner-reporte
 
 ## F. Current Alembic Head and Implementation Gap
 
-**Repository-proven code state after Phase 3 upload orchestration:**
+**Repository-proven code state after Phase 4A embedding metadata schema:**
 
-- Models: `User`, `Document`, `DocumentChunk`
+- Models: `User`, `Document`, `DocumentChunk`, `ChunkEmbedding`
 - Services: `document_service` (includes `create_document_with_chunks()`), `text_extraction_service`, `chunking_service`
 - Upload persists normalized `extracted_text` and chunk rows atomically via `create_document_with_chunks()`
+- `chunk_embeddings` metadata schema in place; Alembic head `f3a1b8c45201`
 - Legacy documents may have zero chunk rows until re-uploaded
-- **Next implementation step:** embedding generation (deferred)
+- **Next implementation step:** Phase 4B — `EmbeddingProvider` and `EmbeddingService`
 
 ---

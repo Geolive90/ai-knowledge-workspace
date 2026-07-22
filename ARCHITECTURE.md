@@ -124,6 +124,39 @@ Constraints:
 - Unique `(document_id, chunk_index)`
 - **No `user_id`** — ownership inherited through parent document
 
+Relationships:
+
+- `DocumentChunk.document` → `Document`
+- `DocumentChunk.embedding` → one-to-one `ChunkEmbedding` (`uselist=False`, `cascade="all, delete-orphan"`)
+
+### ChunkEmbedding (`chunk_embeddings`) — Schema Verified (Phase 4A)
+
+| Column | Purpose |
+|--------|---------|
+| `id` | PK |
+| `chunk_id` | FK → `document_chunks.id`, **ON DELETE CASCADE**, UNIQUE |
+| `model_name` | Embedding provider/model identifier (e.g. `sentence-transformers/all-MiniLM-L6-v2`) |
+| `dimensions` | Vector length at creation time |
+| `created_at` | Audit timestamp |
+
+Constraints:
+
+- One embedding metadata row per chunk (`chunk_id` UNIQUE)
+- **Metadata only** — no `vector_blob`; vectors stored in FAISS (Version 1)
+- **No `user_id`** — ownership inherited through `document_chunks` → `documents.user_id`
+
+Relationships:
+
+- `ChunkEmbedding.chunk` → `DocumentChunk` (`back_populates="embedding"`)
+
+Cascade chain (verified):
+
+```text
+DELETE Document → CASCADE DocumentChunk → CASCADE ChunkEmbedding
+```
+
+Index recovery (Version 1 design): regenerate embeddings from `chunk_text` when FAISS index is rebuilt.
+
 ---
 
 ## 6. Schema Migrations (Repository-Proven Chain)
@@ -134,8 +167,17 @@ Constraints:
 | `c4a8f2e19061` | Add `documents.user_id` + FK + index; non-destructive backfill rules |
 | `d7b3a4f29182` | Add nullable `documents.extracted_text` |
 | `e8c5b6a30293` | Create `document_chunks` |
+| `f3a1b8c45201` | Create `chunk_embeddings` (metadata only) |
 
 Legacy document rows without owner: assigned to `documenttest@example.com` only when rows exist during migration; never deleted.
+
+### Empty-Database Migration Limitation (Pre-Existing Technical Debt)
+
+The full Alembic chain **cannot initialize an empty database**: revision `bdc259e18150` executes `ALTER TABLE users ADD COLUMN role` and requires a pre-existing `users` table. This predates Phase 4A.
+
+**Must be repaired before:** Docker deployment, CI fresh-database testing, or cloud deployment.
+
+Per-revision migration tests stamp at `e8c5b6a30293` and upgrade only subsequent revisions. See `BUILD_LOG.md`.
 
 ---
 
@@ -202,7 +244,11 @@ Full text stored in `documents.extracted_text`. Not exposed on list/get API sche
 | `chunking_service.build_chunks()` | **Implemented, unit-tested (13/13), approved (Phase 2)** |
 | `create_document_with_chunks()` upload orchestration | **Implemented and verified (Phase 3 — July 22, 2026)** |
 | Normalized-text persistence boundary | **Established at orchestration (Phase 3)** |
-| Embeddings | **Deferred** |
+| `chunk_embeddings` metadata schema + model | **Verified and approved (Phase 4A — July 22, 2026)** |
+| `EmbeddingProvider` / `EmbeddingService` | **Deferred (Phase 4B)** |
+| `VectorStore` / FAISS | **Deferred (Phase 4C)** |
+| Upload embedding integration | **Deferred (Phase 4D)** |
+| Semantic retrieval / search API | **Deferred (Phase 4E)** |
 | Chunk API endpoints | **Deferred** |
 
 #### Chunking architectural invariants (Phases 1–3)
@@ -283,9 +329,20 @@ In addition to existing chunking unit tests, Phase 3 implementation must verify:
 6. **Ownership regression:** cross-user access still returns 404.
 7. **Upload response shape unchanged.**
 
-### Future Embedding Storage (Planned)
+### Embedding Metadata Storage (Verified — Phase 4A)
 
-Embeddings will **not** live on `document_chunks`. A separate table or vector index (FAISS, pgvector) will reference `chunk_id`, with provider/model metadata for OpenAI, Gemini, or other providers.
+Embeddings do **not** live on `document_chunks`. Metadata is stored in `chunk_embeddings` referencing `chunk_id`.
+
+| Storage | Holds |
+|---------|--------|
+| **SQLite `chunk_embeddings`** | `model_name`, `dimensions`, `created_at` (metadata only) |
+| **FAISS index file (planned Phase 4C)** | Vector data keyed by `chunk_id` |
+
+Version 1 design decisions (approved):
+
+- No `vector_blob` in SQLite — FAISS is the sole vector store in Version 1
+- Index recovery regenerates embeddings from `chunk_text`
+- `EmbeddingProvider` → `EmbeddingService` → `VectorStore` abstraction chain (Phase 4B+)
 
 ---
 
@@ -295,7 +352,8 @@ All document-derived data inherits ownership through the parent document:
 
 - Extracted text
 - Chunks
-- Embeddings and vectors (future)
+- Embedding metadata (`chunk_embeddings`, Phase 4A)
+- Embedding vectors in FAISS (planned Phase 4C)
 - Conversations, messages, citations (future)
 
 Chunk queries must not bypass document ownership checks. Services should scope through owned `document_id` values.
@@ -306,15 +364,19 @@ Chunk queries must not bypass document ownership checks. Services should scope t
 
 | Gap | Notes |
 |-----|-------|
-| Embeddings / vector retrieval | Planned — chunk rows and offsets ready |
+| `EmbeddingProvider` / `EmbeddingService` | Phase 4B — metadata schema ready |
+| FAISS vector storage / semantic retrieval | Phase 4C–4E |
 | Q&A / citations / conversations | Planned |
 | Frontend | Planned |
 | Production DB, object storage, deployment | Planned |
+| Alembic empty-database initialization | Pre-existing debt — must fix before Docker/CI/cloud |
 | Pinned dependency manifest | `requirements.txt` empty at repo root |
-| Automated integration tests beyond upload/chunking | Expanded in Phase 3; broader suite still planned |
+| Automated integration tests beyond upload/chunking/embedding schema | Expanded through Phase 4A; broader suite still planned |
 | Legacy document backfill | Not implemented — zero-chunk legacy rows remain valid |
 
 Chunk persistence at upload and normalized-text boundary: **resolved in Phase 3**.
+
+Embedding metadata schema: **resolved in Phase 4A**.
 
 ---
 

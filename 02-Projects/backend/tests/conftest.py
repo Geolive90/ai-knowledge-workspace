@@ -6,6 +6,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.database.database import Base
+from app.models.chunk_embedding import ChunkEmbedding  # noqa: F401
 from app.models.document import Document  # noqa: F401
 from app.models.document_chunk import DocumentChunk  # noqa: F401
 from app.models.user import User

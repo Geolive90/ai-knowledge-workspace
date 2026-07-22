@@ -38,3 +38,9 @@ class DocumentChunk(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     document = relationship("Document", back_populates="chunks")
+    embedding = relationship(
+        "ChunkEmbedding",
+        back_populates="chunk",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
