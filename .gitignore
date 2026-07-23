@@ -30,5 +30,8 @@ dist/
 # Runtime uploads
 02-Projects/backend/uploads/
 
+# FAISS vector index persistence (generated at runtime)
+02-Projects/backend/data/
+
 # Local development database
 ai_knowledge_workspace.db
