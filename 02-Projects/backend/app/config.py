@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     vector_store_provider: str = "faiss"
     faiss_index_path: str = "data/faiss/chunk_index.faiss"
 
+    indexing_stale_timeout_seconds: int = Field(default=300, ge=30)
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

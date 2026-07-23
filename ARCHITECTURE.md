@@ -25,9 +25,9 @@ Application Services
   ↓
 Database and File Storage
   ↓
-Document Processing (extract → persist text → chunk → embed)
+Document Processing (extract → persist text → chunk → embed → index)
   ↓
-Embeddings and Vector Retrieval (planned)
+Semantic Retrieval (planned — Phase 4E)
   ↓
 Large Language Model (planned)
   ↓
@@ -61,7 +61,7 @@ Authentication and authorization are separate: a valid token alone does not gran
 
 ## 4. Document Request Flows (Verified)
 
-### Upload — `POST /documents/upload` (Verified — Phase 3)
+### Upload — `POST /documents/upload` (Verified — Phases 3 + 4D)
 
 ```text
 Client (Bearer + file)
@@ -70,9 +70,18 @@ Client (Bearer + file)
   → text_extraction_service.extract_text     (raw text)
   → document_service.create_document_with_chunks(...)
        normalize once → build_chunks → persist Document + DocumentChunk rows (single commit)
-  → JSON: message, document_id, filename, extracted_character_count, text_preview
-       (count and preview use persisted document.extracted_text)
+  → IndexingService.index_document(...)      (Phase 4D — synchronous after chunk persist)
+  → JSON: message, document_id, filename, extracted_character_count, text_preview,
+       indexing_status, chunk_count, vectors_indexed, indexed_at, indexing_error,
+       retry (when indexing_status=failed)
 ```
+
+**Creation vs indexing failure semantics (Phase 4D):**
+
+| Failure point | HTTP | Durable state |
+|---------------|------|---------------|
+| File save, extraction, or chunk DB persist | Non-2xx | No document (file cleaned up where applicable) |
+| Post-upload indexing | **200** | Document + chunks remain; `indexing_status=failed`; retry via `POST /documents/{id}/index` |
 
 ### Upload — Pre-Phase 3 (Historical)
 
@@ -101,6 +110,10 @@ Key fields:
 - `filename`, `file_path`
 - `extracted_text` (`Text`, nullable — legacy rows may be NULL)
 - `uploaded_at`
+- `indexing_status` (`String(32)`, default `pending`) — Phase 4D
+- `indexing_error` (`Text`, nullable) — Phase 4D
+- `indexed_at` (`DateTime`, nullable) — Phase 4D
+- `indexing_started_at` (`DateTime`, nullable) — Phase 4D; stale-processing detection
 
 Relationships:
 
@@ -168,6 +181,7 @@ Index recovery (Version 1 design): regenerate embeddings from `chunk_text` when 
 | `d7b3a4f29182` | Add nullable `documents.extracted_text` |
 | `e8c5b6a30293` | Create `document_chunks` |
 | `f3a1b8c45201` | Create `chunk_embeddings` (metadata only) |
+| `a7c2d9e48103` | Add document indexing lifecycle columns (Phase 4D) |
 
 Legacy document rows without owner: assigned to `documenttest@example.com` only when rows exist during migration; never deleted.
 
@@ -247,7 +261,7 @@ Full text stored in `documents.extracted_text`. Not exposed on list/get API sche
 | `chunk_embeddings` metadata schema + model | **Verified and approved (Phase 4A — July 22, 2026)** |
 | `EmbeddingProvider` / `EmbeddingService` | **Verified and approved (Phase 4B — July 22, 2026)** |
 | `VectorStore` / FAISS | **Verified and approved (Phase 4C — July 22, 2026)** |
-| Upload embedding integration | **Deferred (Phase 4D)** |
+| Upload embedding integration | **Verified and approved (Phase 4D — July 22, 2026)** |
 | Semantic retrieval / search API | **Deferred (Phase 4E)** |
 | Chunk API endpoints | **Deferred** |
 
@@ -343,7 +357,101 @@ Version 1 design decisions (approved):
 - No `vector_blob` in SQLite — FAISS is the sole vector store in Version 1
 - Index recovery regenerates embeddings from `chunk_text`
 - `EmbeddingProvider` → `EmbeddingService` → vector generation; `VectorStore` → FAISS persistence (Phase 4C)
-- Upload orchestration wiring embed + metadata + index deferred to Phase 4D
+- Upload orchestration wiring embed + metadata + index resolved in Phase 4D
+
+### Indexing Orchestration Layer (Verified — Phase 4D)
+
+Phase 4D introduced an orchestration layer that connects existing components without redesigning extraction, chunking, embedding, or vector-store internals. Indexing operates on **already persisted chunks** — it does not re-extract or re-chunk during normal flow.
+
+```text
+Upload / POST /documents/{id}/index
+        ↓
+IndexingService (injected: EmbeddingService, VectorStore, config)
+        ↓
+claim processing (optimistic DB update + in-process RLock)
+        ↓
+optional purge (retry / force / stale reclaim)
+        ↓
+embed texts → vector_store.add() → vector_store.save()
+        ↓
+insert chunk_embeddings + set indexing_status=indexed (single DB commit)
+```
+
+| Component | Role |
+|-----------|------|
+| **`IndexingService`** | Core orchestration: claim, purge, embed, FAISS add/save, metadata commit, failure compensation |
+| **`IndexingResult` / `PurgeResult`** | Structured outcomes for upload and index endpoints |
+| **Exception hierarchy** | `IndexingError` base; `IndexingNotFoundError`, `IndexingConflictError`, `IndexingEmbeddingError`, `IndexingVectorStoreError`, `IndexingPersistenceError` |
+| **Factory** | `create_indexing_service`, `get_indexing_service` (cached), `clear_indexing_caches()` |
+
+**Entry points:**
+
+1. **Primary:** Synchronous `IndexingService.index_document()` at end of `POST /documents/upload` (after `create_document_with_chunks()`)
+2. **Secondary:** `POST /documents/{document_id}/index` for retry or force reindex (`force_reindex` query param)
+
+**Indexing status values:**
+
+| Status | Meaning |
+|--------|---------|
+| `pending` | Document created; not yet indexed (default for new and migrated rows) |
+| `processing` | Indexing claimed; work in progress |
+| `indexed` | Indexing completed successfully — **only this status means retrieval may proceed (Phase 4E gate)** |
+| `failed` | Indexing failed; `indexing_error` populated; retry via index endpoint |
+
+**Configuration (Phase 4D):**
+
+| Setting | Env var | Default |
+|---------|---------|---------|
+| Stale processing timeout | `INDEXING_STALE_TIMEOUT_SECONDS` | `300` (minimum 30) |
+
+Rejected config flags: `INDEXING_ENABLED`, `INDEXING_MAX_CHUNKS`.
+
+#### Consistency model (definitive sequence)
+
+1. Acquire in-process document `RLock` (non-blocking for index entry)
+2. Conditional optimistic DB update → `processing` + `indexing_started_at`
+3. Purge prior artifacts when retry, force reindex, or stale reclaim
+4. Zero chunks → mark `indexed` immediately (`vectors_indexed=0`); skip embed and FAISS
+5. Embed chunk texts via `EmbeddingService`
+6. `vector_store.add()` (in-memory)
+7. `vector_store.save()` — **disk before indexed status**
+8. Single DB commit: insert `chunk_embeddings` rows + set `indexing_status=indexed` + `indexed_at`
+9. On failure: idempotent purge attempt + mark `failed` (with rollback on failed-status commit failure)
+
+**Source of truth:** Only `indexing_status='indexed'` means indexing completed. Metadata or FAISS presence alone is insufficient for retrieval (Phase 4E must gate on status).
+
+#### Retry and idempotency
+
+- **`indexed` without force:** Idempotent no-op; no embed/add/save calls
+- **`failed` or stale `processing`:** Reclaimable via conditional update
+- **Active `processing`:** Returns 409 Conflict
+- **Force reindex:** Purge once, then full re-index
+
+#### Deletion behavior (Phase 4D)
+
+```text
+DELETE /documents/{id}
+  → document_lock (blocking, holds through purge + DB delete)
+  → purge_document_index()  (FAISS remove + save, chunk_embeddings delete)
+  → delete_document()       (ORM cascade: chunks, metadata)
+  → delete_stored_file()    (best effort; logs warning on failure, still HTTP 200)
+```
+
+**Trade-off:** FAISS purge before DB delete prioritizes eliminating ghost vectors over temporary unsearchability if DB delete fails. Document row and file may remain; vectors are gone; retry delete succeeds.
+
+#### Concurrency (Version 1)
+
+- Per-document `threading.RLock` registry (never evicted — accepted v1 limitation)
+- Optimistic conditional DB claim with stale timeout
+- `purge_document_index()` reacquires same RLock (reentrant)
+- Delete holds lock through purge + DB delete to prevent index/delete race
+- Multi-worker FAISS not synchronized
+
+#### Phase 4D contracts preserved (unchanged)
+
+- `create_document_with_chunks()` — signature and single-commit semantics unchanged
+- Text extraction, chunking, `EmbeddingService`, `FaissVectorStore` internals not redesigned
+- FastAPI HTTP mapping remains in routers; core service has no FastAPI imports
 
 ### Embedding Service Layer (Verified — Phase 4B)
 
@@ -380,13 +488,13 @@ SentenceTransformersProvider   lazy model load, canonical model metadata
 - Dimensions are **provider-derived**, not configured
 - Canonical `model_name` for metadata: `sentence-transformers/all-MiniLM-L6-v2` (loads via short name `all-MiniLM-L6-v2`)
 - Default service creation reuses cached `get_embedding_provider()` — single model instance per process
-- `app/dependencies.py` not modified — FastAPI wiring deferred to Phase 4D
+- FastAPI wiring for embedding and indexing services added in Phase 4D (`get_embedding_service_dependency`, `get_indexing_service_dependency`)
 
 ### Vector Store Layer (Verified — Phase 4C)
 
 Phase 4C introduced a **provider-independent vector-storage layer** with FAISS as the sole Version 1 implementation. It stores embedding vectors together with enough identifier metadata to retrieve corresponding document chunks later, without persisting vectors in SQLite.
 
-**Purpose:** Accept pre-computed embedding vectors keyed by `chunk_id`, index them for nearest-neighbor search, persist the index to disk, and support removal by chunk identifier. Upload orchestration, ownership filtering, and semantic retrieval remain deferred to Phases 4D and 4E.
+**Purpose:** Accept pre-computed embedding vectors keyed by `chunk_id`, index them for nearest-neighbor search, persist the index to disk, and support removal by chunk identifier. Upload orchestration resolved in Phase 4D; ownership filtering and semantic retrieval remain Phase 4E.
 
 ```text
 EmbeddingProvider.dimensions
@@ -444,11 +552,11 @@ IndexIDMap2(IndexFlatIP)
 - Single-process assumption; multiple workers each hold an independent in-memory index with no cross-process file locking
 - Future versions may split read/write synchronization if higher concurrency is needed
 
-**Out of scope (Phase 4C):**
+**Out of scope (Phase 4C — resolved in later phases):**
 
-- Upload embedding integration (Phase 4D)
+- Upload embedding integration (Phase 4D — complete)
 - Ownership pre-filtering in search (Phase 4E)
-- Semantic retrieval API, RAG, routers, `app/dependencies.py` wiring
+- Semantic retrieval API, RAG
 - Storing vectors in SQLite
 
 ---
@@ -471,15 +579,16 @@ Chunk queries must not bypass document ownership checks. Services should scope t
 
 | Gap | Notes |
 |-----|-------|
-| Upload embedding integration | Phase 4D |
 | Semantic retrieval / search API | Phase 4E |
 | Q&A / citations / conversations | Planned |
 | Frontend | Planned |
 | Production DB, object storage, deployment | Planned |
 | Alembic empty-database initialization | Pre-existing debt — must fix before Docker/CI/cloud |
 | Pinned dependency manifest | `requirements.txt` pins embedding + FAISS deps; not full backend manifest |
-| Automated integration tests beyond upload/chunking/embedding/vector store | Expanded through Phase 4C |
 | Legacy document backfill | Not implemented — zero-chunk legacy rows remain valid |
+| Index rebuild from chunk_text | Designed but not implemented (Phase 4F) |
+| Background/async indexing | Synchronous in upload request (v1) |
+| Multi-worker FAISS coordination | Single-process RLock (v1) |
 
 Chunk persistence at upload and normalized-text boundary: **resolved in Phase 3**.
 
@@ -488,6 +597,8 @@ Embedding metadata schema: **resolved in Phase 4A**.
 Text-to-vector service layer: **resolved in Phase 4B**.
 
 FAISS vector storage layer: **resolved in Phase 4C**.
+
+Upload indexing orchestration: **resolved in Phase 4D**.
 
 ---
 

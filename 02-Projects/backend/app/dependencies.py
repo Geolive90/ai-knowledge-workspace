@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database.database import SessionLocal
 from app.models.user import User
+from app.services.indexing.factory import get_indexing_service
+from app.services.indexing.service import IndexingService
 
 
 oauth2_scheme = OAuth2PasswordBearer(
@@ -57,3 +59,7 @@ def get_current_user(
         raise credentials_exception
 
     return user
+
+
+def get_indexing_service_dependency() -> IndexingService:
+    return get_indexing_service()

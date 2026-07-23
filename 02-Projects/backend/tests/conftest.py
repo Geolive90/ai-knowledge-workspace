@@ -13,6 +13,8 @@ from app.models.document import Document  # noqa: F401
 from app.models.document_chunk import DocumentChunk  # noqa: F401
 from app.models.user import User
 from app.services.embedding.factory import clear_embedding_caches
+from app.services.embedding.service import EmbeddingService
+from app.services.indexing.factory import clear_indexing_caches, create_indexing_service
 from app.services.vector_store.exceptions import (
     VectorStoreDimensionMismatchError,
     VectorStoreDuplicateIdError,
@@ -156,13 +158,29 @@ def fake_embedding_provider() -> FakeEmbeddingProvider:
     return FakeEmbeddingProvider()
 
 
+@pytest.fixture
+def fake_embedding_service(fake_embedding_provider) -> EmbeddingService:
+    return EmbeddingService(fake_embedding_provider, batch_size=4)
+
+
+@pytest.fixture
+def fake_indexing_service(fake_embedding_service, fake_vector_store):
+    return create_indexing_service(
+        embedding_service=fake_embedding_service,
+        vector_store=fake_vector_store,
+        stale_timeout_seconds=300,
+    )
+
+
 @pytest.fixture(autouse=True)
 def clear_embedding_factory_caches():
     clear_embedding_caches()
     clear_vector_store_caches()
+    clear_indexing_caches()
     yield
     clear_embedding_caches()
     clear_vector_store_caches()
+    clear_indexing_caches()
 
 
 @pytest.fixture

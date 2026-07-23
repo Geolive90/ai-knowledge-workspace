@@ -1,10 +1,18 @@
+from dataclasses import dataclass
 from typing import Optional
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
 from app.services.chunking_service import build_chunks, normalize_line_endings
+
+
+@dataclass(frozen=True)
+class IndexingChunkRecord:
+    chunk_id: int
+    chunk_index: int
+    chunk_text: str
 
 
 def get_documents_for_user(db: Session, user_id: int) -> list[Document]:
@@ -25,6 +33,41 @@ def get_document_for_user(
         .filter(Document.id == document_id, Document.user_id == user_id)
         .first()
     )
+
+
+def get_owned_document_with_ordered_chunks(
+    db: Session,
+    document_id: int,
+    user_id: int,
+) -> Optional[Document]:
+    return (
+        db.query(Document)
+        .options(joinedload(Document.chunks))
+        .filter(Document.id == document_id, Document.user_id == user_id)
+        .first()
+    )
+
+
+def get_indexing_chunk_records(document: Document) -> list[IndexingChunkRecord]:
+    ordered_chunks = sorted(document.chunks, key=lambda chunk: chunk.chunk_index)
+    return [
+        IndexingChunkRecord(
+            chunk_id=chunk.id,
+            chunk_index=chunk.chunk_index,
+            chunk_text=chunk.chunk_text,
+        )
+        for chunk in ordered_chunks
+    ]
+
+
+def get_document_chunk_ids(db: Session, document_id: int) -> list[int]:
+    rows = (
+        db.query(DocumentChunk.id)
+        .filter(DocumentChunk.document_id == document_id)
+        .order_by(DocumentChunk.chunk_index)
+        .all()
+    )
+    return [row[0] for row in rows]
 
 
 def create_document(

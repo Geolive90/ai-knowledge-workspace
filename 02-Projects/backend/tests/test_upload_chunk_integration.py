@@ -7,7 +7,7 @@ import pytest
 from docx import Document as DocxDocument
 from fastapi.testclient import TestClient
 
-from app.dependencies import get_db
+from app.dependencies import get_db, get_indexing_service_dependency
 from app.main import app
 from app.models.document import Document
 from app.models.document_chunk import DocumentChunk
@@ -23,7 +23,7 @@ def upload_folder(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def client(db_session, upload_folder):
+def client(db_session, upload_folder, fake_indexing_service):
     def override_get_db():
         try:
             yield db_session
@@ -31,6 +31,9 @@ def client(db_session, upload_folder):
             pass
 
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_indexing_service_dependency] = (
+        lambda: fake_indexing_service
+    )
 
     with TestClient(app) as test_client:
         yield test_client
@@ -80,9 +83,16 @@ def test_authenticated_txt_upload_persists_document_and_chunks(
         "filename",
         "extracted_character_count",
         "text_preview",
+        "indexing_status",
+        "chunk_count",
+        "vectors_indexed",
+        "indexed_at",
+        "indexing_error",
+        "retry",
     }
     assert payload["filename"] == "integration.txt"
-    assert payload["message"] == "Document uploaded and text extracted successfully."
+    assert payload["message"] == "Document uploaded and indexed successfully."
+    assert payload["indexing_status"] == "indexed"
 
     document = (
         db_session.query(Document)

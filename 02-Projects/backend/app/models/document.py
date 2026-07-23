@@ -15,6 +15,10 @@ class Document(Base):
     file_path = Column(String, nullable=False)
     extracted_text = Column(Text, nullable=True)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
+    indexing_status = Column(String(32), nullable=False, default="pending")
+    indexing_error = Column(Text, nullable=True)
+    indexed_at = Column(DateTime, nullable=True)
+    indexing_started_at = Column(DateTime, nullable=True)
 
     owner = relationship("User", back_populates="documents")
     chunks = relationship(

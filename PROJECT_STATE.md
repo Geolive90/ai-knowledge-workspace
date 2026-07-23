@@ -241,6 +241,32 @@ The exact structure must be inspected before any AI assistant makes changes.
   - Full suite with FAISS integration: **92 passed**, 2 skipped, 3 pre-existing warnings
 - No upload integration, retrieval orchestration, routers, migrations, models, schemas, or `app/dependencies.py` changes
 
+### Embeddings — Phase 4D (Document Indexing Orchestration)
+
+- **Status:** complete, verified, and approved (July 22, 2026)
+- Orchestration layer connecting `EmbeddingService`, `FaissVectorStore`, and `chunk_embeddings` metadata
+- `IndexingService.index_document()` — claim → purge → embed → FAISS add/save → metadata commit
+- `IndexingService.purge_document_index()` — idempotent vector + metadata removal
+- Document indexing lifecycle columns: `indexing_status`, `indexing_error`, `indexed_at`, `indexing_started_at`
+- Migration `a7c2d9e48103` (Alembic head)
+- Configuration: `INDEXING_STALE_TIMEOUT_SECONDS` (default 300, min 30)
+- Upload: synchronous indexing after chunk persist; HTTP 200 on indexing failure with retry path
+- `POST /documents/{document_id}/index` — retry and force reindex
+- Delete: document lock → purge → DB delete → file delete (best effort)
+- Per-document `RLock` + optimistic DB claim; stale processing reclaim
+- **`create_document_with_chunks()` contract preserved unchanged**
+- **Source files created (10):**
+  - `app/services/indexing/{__init__,exceptions,result,service,factory}.py`
+  - `alembic/versions/a7c2d9e48103_add_document_indexing_fields.py`
+  - `tests/{test_indexing_service,test_indexing_api,test_indexing_faiss_integration,test_indexing_verification,test_indexing_compensation_gaps}.py`
+- **Modified (9):** `config.py`, `dependencies.py`, `models/document.py`, `routers/documents.py`, `schemas/document.py`, `services/document_service.py`, `tests/conftest.py`, `tests/test_chunk_embedding_model.py`, `tests/test_upload_chunk_integration.py`
+- **Final test results:**
+  - Phase 4D indexing tests: **51 passed**
+  - Full default suite: **120 passed**, 25 skipped, 3 pre-existing warnings
+  - All integration gates: **145 passed**, 0 skipped, 3 pre-existing warnings
+- Defects found and fixed during verification: delete/index race; compensation error logging/context; `_mark_failed` rollback; stored-file delete logging
+- No semantic retrieval (Phase 4E), no new runtime dependencies
+
 ### Service and Utility Foundation
 
 - Document schema created
@@ -256,24 +282,27 @@ The exact structure must be inspected before any AI assistant makes changes.
 
 Milestone:
 
-Embeddings — Phase 4C (Vector Store / FAISS)
+Embeddings — Phase 4D (Document Indexing Orchestration)
 
 - **Implemented, verified, and approved:** July 22, 2026
-- **Git commit:** pending in closeout step
+- **Git commit:** recorded at Phase 4D closeout (July 22, 2026)
 
 The milestone included:
 
-- `app/services/vector_store/` package (6 files) — Protocol, exceptions, factory, `FaissVectorStore`
-- 3 new test files; `requirements.txt` with `faiss-cpu==1.14.3`
-- Modified `app/config.py`, `tests/conftest.py`
-- **9 new files, 3 modified files** (12 total touched)
-- Targeted vector-store unit tests: 16 passed
-- FAISS integration tests: 20 passed (`RUN_FAISS_INTEGRATION=1`)
-- Complete default suite: **72 passed**, 22 skipped
-- Complete suite with FAISS: **92 passed**, 2 skipped
-- Defects corrected: same-batch duplicate-ID rejection; loaded-index inner FlatIP validation
+- `app/services/indexing/` package (5 files) — orchestration service, factory, exceptions, results
+- Alembic migration `a7c2d9e48103` — document indexing lifecycle columns
+- Upload integration: synchronous indexing after `create_document_with_chunks()`
+- `POST /documents/{document_id}/index` retry/force-reindex endpoint
+- Delete integration: purge → DB delete → file delete (with document lock)
+- 5 new test files (51 Phase 4D indexing tests including compensation gaps)
+- **10 files created, 9 files modified** (19 total touched)
+- Default suite: **120 passed**, 25 skipped
+- All gates: **145 passed**, 0 skipped
+- Defects corrected: delete/index race; compensation error context; failed-status rollback; stored-file delete logging
 
-Previous verified milestones:
+Previous verified milestone:
+
+Embeddings — Phase 4C (Vector Store / FAISS) — July 22, 2026
 
 - Embeddings — Phase 4B (Embedding Provider and Service) — July 22, 2026
 - Embeddings — Phase 4A (Embedding Metadata Schema) — July 22, 2026
@@ -289,7 +318,7 @@ Previous verified milestones:
 
 Current area of work:
 
-**Phase 4D — Upload pipeline integration (atomic embed + index)** — next planned milestone; **not started**.
+**Phase 4E — Semantic retrieval and search API** — next planned milestone; **not started**.
 
 Repository state:
 
@@ -297,9 +326,11 @@ Repository state:
 - Embeddings **Phase 4A:** metadata schema in place (`chunk_embeddings`)
 - Embeddings **Phase 4B:** text-to-vector service layer complete — `EmbeddingService` + `SentenceTransformersProvider`
 - Embeddings **Phase 4C:** FAISS vector storage layer complete — `VectorStore` + `FaissVectorStore`
-- Upload persists normalized `extracted_text` and chunk rows atomically (unchanged)
-- No upload embedding integration, semantic search, or RAG yet
+- Embeddings **Phase 4D:** document indexing orchestration complete — upload + retry index + delete purge
+- Upload persists normalized `extracted_text` and chunk rows atomically, then indexes synchronously
+- Only `indexing_status='indexed'` means indexing completed (Phase 4E retrieval gate)
 - Vectors stored in FAISS only (Version 1); `chunk_embeddings` holds metadata only
+- No semantic search or RAG yet
 
 See `ARCHITECTURE.md` for embedding and vector-store architecture and invariants.
 
@@ -309,10 +340,9 @@ See `ARCHITECTURE.md` for embedding and vector-store architecture and invariants
 
 The expected implementation sequence is:
 
-1. **Phase 4D — Upload pipeline integration (atomic embed + index)** — next; not started
-2. Phase 4E — Semantic retrieval and search API
-3. Phase 4F — Deletion consistency and index rebuild
-5. Add question-answering endpoint.
+1. **Phase 4E — Semantic retrieval and search API** — next; not started
+2. Phase 4F — Index rebuild and deletion consistency hardening
+3. Add question-answering endpoint.
 6. Add grounded AI responses.
 7. Add citations.
 8. Add conversation and message history.
@@ -379,8 +409,21 @@ Areas still requiring attention include:
 
 - Extracted text **is persisted** on upload in `documents.extracted_text` (nullable for legacy rows).
 - Upload normalizes extracted text at orchestration and persists chunk rows atomically (Phase 3).
-- Embedding **metadata schema** exists (`chunk_embeddings`, Phase 4A); **text-to-vector service** exists (Phase 4B); **FAISS vector storage** exists (Phase 4C)
-- Upload embedding integration, semantic retrieval, and Q&A are unfinished.
+- Upload indexes chunks synchronously after persist (Phase 4D).
+- Embedding **metadata schema** exists (`chunk_embeddings`, Phase 4A); **text-to-vector service** exists (Phase 4B); **FAISS vector storage** exists (Phase 4C); **indexing orchestration** exists (Phase 4D)
+- Semantic retrieval and Q&A are unfinished.
+
+### Phase 4D Known Version 1 Limitations
+
+- Single-process per-document `RLock`; lock registry never evicts (one RLock per ever-indexed document ID)
+- Synchronous indexing in upload request path — no background job queue
+- Multi-worker FAISS not synchronized across processes
+- FAISS purge before DB delete: if DB delete fails, document temporarily unsearchable but retry-safe
+- Orphaned physical file possible if stored-file delete fails after DB commit (logged, HTTP 200)
+- Failed-status commit failure leaves `processing` until stale timeout reclaim (proven recoverable)
+- Compensation purge failures may leave orphan vectors until healthy retry (proven recoverable)
+- No `content_hash` or document replacement flow — force reindex via index endpoint only
+- Phase 4E must gate retrieval on `indexing_status='indexed'`, not metadata/FAISS alone
 
 ### Phase 4C Known Version 1 Limitations
 

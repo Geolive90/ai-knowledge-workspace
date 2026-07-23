@@ -198,25 +198,30 @@ def test_migration_module_is_structurally_valid() -> None:
 def test_migration_upgrade_and_downgrade(tmp_path) -> None:
     from alembic import command
     from alembic.config import Config
-    from sqlalchemy import create_engine
+    from sqlalchemy import Column, DateTime, Integer, MetaData, String, Table, Text, create_engine
 
-    from app.database.database import Base
-    from app.models.document import Document
     from app.models.document_chunk import DocumentChunk
     from app.models.user import User
 
     database_path = tmp_path / "migration_test.db"
     database_url = f"sqlite:///{database_path.as_posix()}"
 
-    engine = create_engine(database_url)
-    Base.metadata.create_all(
-        engine,
-        tables=[
-            User.__table__,
-            Document.__table__,
-            DocumentChunk.__table__,
-        ],
+    legacy_metadata = MetaData()
+    legacy_documents = Table(
+        "documents",
+        legacy_metadata,
+        Column("id", Integer, primary_key=True),
+        Column("user_id", Integer, nullable=False),
+        Column("filename", String, nullable=False),
+        Column("file_path", String, nullable=False),
+        Column("extracted_text", Text, nullable=True),
+        Column("uploaded_at", DateTime),
     )
+
+    engine = create_engine(database_url)
+    User.__table__.create(bind=engine, checkfirst=True)
+    legacy_documents.create(bind=engine, checkfirst=True)
+    DocumentChunk.__table__.create(bind=engine, checkfirst=True)
     engine.dispose()
 
     alembic_cfg = Config(str(BACKEND_ROOT / "alembic.ini"))
@@ -243,6 +248,15 @@ def test_migration_upgrade_and_downgrade(tmp_path) -> None:
         "dimensions",
         "created_at",
     }
+
+    cursor.execute("PRAGMA table_info(documents)")
+    document_columns = {row[1] for row in cursor.fetchall()}
+    assert {
+        "indexing_status",
+        "indexing_error",
+        "indexed_at",
+        "indexing_started_at",
+    }.issubset(document_columns)
     connection.close()
 
     command.downgrade(alembic_cfg, "e8c5b6a30293")

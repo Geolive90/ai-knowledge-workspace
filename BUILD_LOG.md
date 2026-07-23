@@ -1397,6 +1397,12 @@ The following items supplement earlier milestones. Items marked **(owner-reporte
 - `requirements.txt` pins `sentence-transformers==5.6.0` and `faiss-cpu==1.14.3`
 - **Next implementation step:** Phase 4D — upload pipeline integration (atomic embed + index)
 
+**Updated after Phase 4D closeout (July 22, 2026):**
+
+- Upload indexing orchestration wired (Phase 4D complete)
+- Alembic head `a7c2d9e48103`
+- **Next implementation step:** Phase 4E — semantic retrieval and search API
+
 ---
 
 # Embeddings — Phase 4C (Vector Store / FAISS) — July 22, 2026
@@ -1597,5 +1603,137 @@ Test: `test_persistence_invariant_across_reload`
 ## Not in Phase 4C Scope (Confirmed)
 
 No upload embedding integration, semantic retrieval API, RAG, routers, migrations, model/schema changes, `app/dependencies.py` wiring, or Phase 4D orchestration.
+
+---
+
+# Embeddings — Phase 4D (Document Indexing Orchestration) — July 22, 2026
+
+## Status
+
+**Complete, verified, and approved** (July 22, 2026).
+
+## Objective
+
+Implement the orchestration layer connecting existing components: after upload/chunking, embed chunks → persist `chunk_embeddings` metadata → add vectors to FAISS → save index → update document indexing status. Phases 1–3 already handle upload → extract → chunk → persist; Phase 4D indexes **existing persisted chunks**.
+
+## Chronology
+
+| Step | Event |
+|------|-------|
+| 1 | Architecture proposal for `IndexingService`, status columns, upload/index/delete integration |
+| 2 | Independent architecture review — approved consistency sequence, entry points, deletion order, concurrency model |
+| 3 | Implementation: indexing package, migration, service helpers, DI wiring, router integration |
+| 4 | Unit tests with fakes; API tests; FAISS integration tests |
+| 5 | Independent implementation review — architectural fidelity confirmed |
+| 6 | Targeted verification pass — 8 gap areas identified as unproven |
+| 7 | Gap-closure verification — 11 compensation/deletion tests added |
+| 8 | Defects discovered and fixed: delete/index race, compensation error context, failed-status rollback, stored-file delete logging |
+| 9 | Final test suites: 120 passed default; 145 passed all gates |
+| 10 | Final approval granted for closeout |
+
+## Architecture (Repository-Proven)
+
+```text
+IndexingService (EmbeddingService + VectorStore + stale timeout)
+        ↓
+claim processing (optimistic DB + RLock)
+        ↓
+optional purge → embed → add → save → metadata commit
+```
+
+**Consistency sequence (definitive):**
+
+1. In-process document lock + conditional DB update → `processing`
+2. Purge prior artifacts if retry/force/stale reclaim
+3. Zero chunks → mark `indexed` immediately
+4. Embed texts
+5. `vector_store.add()` (in-memory)
+6. `vector_store.save()` (**disk before indexed status**)
+7. DB commit: `chunk_embeddings` + `indexing_status=indexed` + `indexed_at` (same transaction)
+8. On failure: idempotent purge attempt + `failed` status
+
+## Files Created (10 New Files)
+
+### Indexing service package (5 files)
+
+| File | Purpose |
+|------|---------|
+| `02-Projects/backend/app/services/indexing/__init__.py` | Public exports |
+| `02-Projects/backend/app/services/indexing/exceptions.py` | Exception hierarchy |
+| `02-Projects/backend/app/services/indexing/result.py` | `IndexingResult`, `PurgeResult` |
+| `02-Projects/backend/app/services/indexing/service.py` | `IndexingService` orchestration |
+| `02-Projects/backend/app/services/indexing/factory.py` | Factory + cached singleton |
+
+### Migration (1 file)
+
+| File | Purpose |
+|------|---------|
+| `02-Projects/backend/alembic/versions/a7c2d9e48103_add_document_indexing_fields.py` | Indexing lifecycle columns on `documents` |
+
+### Tests (5 files)
+
+| File | Purpose |
+|------|---------|
+| `02-Projects/backend/tests/test_indexing_service.py` | Unit tests with fakes (12) |
+| `02-Projects/backend/tests/test_indexing_api.py` | API tests (5) |
+| `02-Projects/backend/tests/test_indexing_faiss_integration.py` | FAISS integration (1) |
+| `02-Projects/backend/tests/test_indexing_verification.py` | Independent review verification (22) |
+| `02-Projects/backend/tests/test_indexing_compensation_gaps.py` | Compensation/deletion gap closure (11) |
+
+## Files Modified (9 Files)
+
+| File | Change |
+|------|--------|
+| `02-Projects/backend/app/models/document.py` | Indexing lifecycle columns |
+| `02-Projects/backend/app/services/document_service.py` | Indexing chunk helpers |
+| `02-Projects/backend/app/config.py` | `indexing_stale_timeout_seconds` |
+| `02-Projects/backend/app/dependencies.py` | `get_indexing_service_dependency()` |
+| `02-Projects/backend/app/routers/documents.py` | Upload/index/delete integration |
+| `02-Projects/backend/app/schemas/document.py` | Indexing response schemas |
+| `02-Projects/backend/tests/conftest.py` | Fake indexing service, cache clearing |
+| `02-Projects/backend/tests/test_chunk_embedding_model.py` | Legacy-table migration test fix |
+| `02-Projects/backend/tests/test_upload_chunk_integration.py` | Upload indexing fields |
+
+**Total touched:** 10 new + 9 modified = **19 files**
+
+## Migration
+
+| Field | Value |
+|-------|--------|
+| Revision | `a7c2d9e48103` |
+| Down revision | `f3a1b8c45201` |
+| Adds | `indexing_status`, `indexing_error`, `indexed_at`, `indexing_started_at` |
+
+## API Changes
+
+| Endpoint | Change |
+|----------|--------|
+| `POST /documents/upload` | Indexing after chunk persist; indexing fields in response |
+| `POST /documents/{document_id}/index` | **New** — retry / force reindex |
+| `DELETE /documents/{document_id}` | Purge before DB delete; document lock |
+| `GET /documents*` | `indexing_status`, `indexed_at` on `DocumentResponse` |
+
+## Dependency Changes
+
+None new. Uses Phase 4B/4C dependencies.
+
+## Defects Found and Fixed During Verification
+
+1. **Delete/index race** — document lock through purge + DB delete
+2. **Compensation error swallowed** — log + append to `indexing_error`
+3. **Failed-status commit rollback** — `db.rollback()` on commit failure
+4. **Stored-file delete HTTP 500** — catch, log warning, return 200
+
+## Final Test Results
+
+| Suite | Result |
+|-------|--------|
+| Phase 4D indexing tests | 51 passed |
+| Default `pytest tests/` | 120 passed, 25 skipped |
+| All gates | 145 passed, 0 skipped |
+
+## Known Version 1 Limitations
+
+Documented in `ARCHITECTURE.md` and `PROJECT_STATE.md`. See `ENGINEERING_LESSONS.md` for detailed lessons.
 
 ---
