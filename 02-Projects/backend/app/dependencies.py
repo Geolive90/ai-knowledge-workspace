@@ -8,6 +8,8 @@ from app.database.database import SessionLocal
 from app.models.user import User
 from app.services.indexing.factory import get_indexing_service
 from app.services.indexing.service import IndexingService
+from app.services.retrieval.factory import get_retrieval_service
+from app.services.retrieval.service import RetrievalService
 
 
 oauth2_scheme = OAuth2PasswordBearer(
@@ -63,3 +65,7 @@ def get_current_user(
 
 def get_indexing_service_dependency() -> IndexingService:
     return get_indexing_service()
+
+
+def get_retrieval_service_dependency() -> RetrievalService:
+    return get_retrieval_service()

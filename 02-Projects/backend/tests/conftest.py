@@ -15,6 +15,7 @@ from app.models.user import User
 from app.services.embedding.factory import clear_embedding_caches
 from app.services.embedding.service import EmbeddingService
 from app.services.indexing.factory import clear_indexing_caches, create_indexing_service
+from app.services.retrieval.factory import clear_retrieval_caches, create_retrieval_service
 from app.services.vector_store.exceptions import (
     VectorStoreDimensionMismatchError,
     VectorStoreDuplicateIdError,
@@ -172,15 +173,25 @@ def fake_indexing_service(fake_embedding_service, fake_vector_store):
     )
 
 
+@pytest.fixture
+def fake_retrieval_service(fake_embedding_service, fake_vector_store):
+    return create_retrieval_service(
+        embedding_service=fake_embedding_service,
+        vector_store=fake_vector_store,
+    )
+
+
 @pytest.fixture(autouse=True)
 def clear_embedding_factory_caches():
     clear_embedding_caches()
     clear_vector_store_caches()
     clear_indexing_caches()
+    clear_retrieval_caches()
     yield
     clear_embedding_caches()
     clear_vector_store_caches()
     clear_indexing_caches()
+    clear_retrieval_caches()
 
 
 @pytest.fixture
