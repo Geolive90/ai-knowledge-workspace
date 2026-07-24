@@ -27,7 +27,7 @@ Database and File Storage
   ↓
 Document Processing (extract → persist text → chunk → embed → index)
   ↓
-Semantic Retrieval (planned — Phase 4E)
+Semantic Retrieval (verified — Phase 4E)
   ↓
 Large Language Model (planned)
   ↓
@@ -90,6 +90,45 @@ Previously used `document_service.create_document()` without chunk persistence. 
 ### List / Retrieve / Download / Delete
 
 All use `get_document_for_user` or `get_documents_for_user` — owner-scoped. See prior verified flows in repository routers.
+
+### Search — `POST /search` (Verified — Phase 4E)
+
+```text
+Client (Bearer + SearchRequest JSON)
+  → get_current_user
+  → search.router.search
+  → RetrievalService.search(user_id, query, top_k, document_id?)
+       validate query (non-empty, max length)
+       embed query via EmbeddingService
+       compute fetch_k (bounded over-fetch)
+       VectorStore.search(query_vector, fetch_k)   (global FAISS — ownership-agnostic)
+       document_service.get_indexed_searchable_chunks_by_ids(chunk_ids, user_id, document_id?)
+            filter: owned documents only
+            gate: indexing_status='indexed'
+       rank by FAISS score; limit to top_k
+  → JSON: query, top_k, results[{ chunk_id, document_id, document_filename, chunk_index, chunk_text, score }]
+```
+
+**Router boundary:** The search router is thin — JWT authentication, request validation via Pydantic schema, dependency injection, and exception-to-HTTP mapping only. All retrieval orchestration lives in `RetrievalService`.
+
+**Phase 4E explicit boundary — not in scope:**
+
+- No LLM answering
+- No RAG response generation
+- No citations
+- No conversation history
+
+**Exception-to-HTTP mapping (search router):**
+
+| Exception | HTTP | Message |
+|-----------|------|---------|
+| `RetrievalValidationError` | 422 | Validation detail from service |
+| `RetrievalNotFoundError` | 404 | `"Document not found."` |
+| `RetrievalEmbeddingError` | 500 | `"Search could not be completed."` |
+| `RetrievalVectorStoreError` | 500 | `"Search could not be completed."` |
+| `RetrievalError` (base) | 500 | `"Search could not be completed."` |
+
+Optional `document_id` scopes retrieval to one owned, indexed document. Cross-user or non-existent document IDs return **404** (same message as missing documents).
 
 ---
 
@@ -262,7 +301,7 @@ Full text stored in `documents.extracted_text`. Not exposed on list/get API sche
 | `EmbeddingProvider` / `EmbeddingService` | **Verified and approved (Phase 4B — July 22, 2026)** |
 | `VectorStore` / FAISS | **Verified and approved (Phase 4C — July 22, 2026)** |
 | Upload embedding integration | **Verified and approved (Phase 4D — July 22, 2026)** |
-| Semantic retrieval / search API | **Deferred (Phase 4E)** |
+| Semantic retrieval / search API | **Verified and approved (Phase 4E — July 23, 2026)** |
 | Chunk API endpoints | **Deferred** |
 
 #### Chunking architectural invariants (Phases 1–3)
@@ -453,6 +492,70 @@ DELETE /documents/{id}
 - Text extraction, chunking, `EmbeddingService`, `FaissVectorStore` internals not redesigned
 - FastAPI HTTP mapping remains in routers; core service has no FastAPI imports
 
+### Semantic Retrieval Layer (Verified — Phase 4E)
+
+**Status:** Implemented and verified (July 23, 2026).
+
+**Purpose:** Owner-scoped semantic search over indexed document chunks. Returns ranked chunk matches with similarity scores. Does not generate answers, citations, or conversational responses.
+
+**HTTP surface:**
+
+| Endpoint | Auth | Request body | Response |
+|----------|------|--------------|----------|
+| `POST /search` | JWT (`get_current_user`) | `SearchRequest`: `query` (required), `top_k` (optional), `document_id` (optional) | `SearchResponse` |
+
+**Response schema (`SearchResponse`):**
+
+- `query` — echoed search query
+- effective `top_k` (response field `top_k`; resolved after defaults and max cap)
+- `results` — list of `SearchHitResponse` items, each containing:
+  - `chunk_id`
+  - `document_id`
+  - `document_filename`
+  - `chunk_index`
+  - `chunk_text`
+  - `score` (FAISS similarity score)
+
+**Thin router / fat service boundary:**
+
+- `app/routers/search.py` — authentication, schema validation, DI, HTTP status mapping
+- `app/services/retrieval/service.py` — `RetrievalService.search()` orchestration
+
+**RetrievalService orchestration sequence:**
+
+1. **Query validation** — reject empty/whitespace-only queries and queries exceeding configured max length (`RetrievalValidationError`).
+2. **Query embedding** — single-vector embed via injected `EmbeddingService` (`RetrievalEmbeddingError` on failure).
+3. **Bounded over-fetch** — compute `fetch_k = min(index_count, search_max_fetch_k, max(top_k, top_k × multiplier, top_k + buffer))` from settings defaults.
+4. **Global FAISS search** — `VectorStore.search(query_vector, fetch_k)` returns `(chunk_id, score)` pairs. **VectorStore remains ownership-agnostic** (Phase 4C design preserved).
+5. **Ownership filtering** — hydrate candidate chunks via `document_service.get_indexed_searchable_chunks_by_ids()`, scoped to `user_id`.
+6. **`indexing_status='indexed'` gate** — only chunks belonging to documents with completed indexing are returned (literal `"indexed"` string in document service to avoid circular imports with indexing package).
+7. **Optional document scope** — when `document_id` is provided, verify ownership and indexed status; non-owned or missing documents raise `RetrievalNotFoundError`.
+8. **Ranking and limiting** — preserve FAISS score order among surviving rows; return at most `top_k` results.
+
+**FAISS chunk ID alignment:** FAISS stores `document_chunks.id` as the vector ID (Phase 4C invariant). Retrieval uses those IDs for database hydration.
+
+**Configuration defaults (`app/config.py`):**
+
+| Setting | Default |
+|---------|---------|
+| `search_default_top_k` | 10 |
+| `search_max_top_k` | 50 |
+| `search_over_fetch_multiplier` | 5 |
+| `search_over_fetch_min_buffer` | 20 |
+| `search_max_fetch_k` | 200 |
+| `search_max_query_length` | 4000 |
+
+**Version 1 limitation — global FAISS with application-layer filtering:**
+
+The FAISS index is **global** (all users' vectors in one index). `VectorStore.search()` has no ownership awareness. `RetrievalService` compensates with bounded over-fetch followed by ownership and indexing-status filtering in the application layer. After filtering, the response may validly contain **fewer than `top_k` results** even when additional owned indexed chunks exist beyond the over-fetch window. This is an accepted Version 1 tradeoff; multi-tenant pre-filtering inside FAISS is deferred.
+
+**Phase 4E explicit non-goals (unchanged from plan):**
+
+- No LLM answering or RAG response generation
+- No citations
+- No conversation or message history
+- No changes to `DocumentResponse` or list/detail document endpoints (richer indexing metadata on those endpoints recorded as a possible future enhancement only)
+
 ### Embedding Service Layer (Verified — Phase 4B)
 
 Phase 4B introduced text-to-vector conversion **without** vector storage, upload integration, search, or RAG behavior.
@@ -488,13 +591,13 @@ SentenceTransformersProvider   lazy model load, canonical model metadata
 - Dimensions are **provider-derived**, not configured
 - Canonical `model_name` for metadata: `sentence-transformers/all-MiniLM-L6-v2` (loads via short name `all-MiniLM-L6-v2`)
 - Default service creation reuses cached `get_embedding_provider()` — single model instance per process
-- FastAPI wiring for embedding and indexing services added in Phase 4D (`get_embedding_service_dependency`, `get_indexing_service_dependency`)
+- FastAPI wiring for embedding, indexing, and retrieval services added in Phases 4D–4E (`get_embedding_service_dependency`, `get_indexing_service_dependency`, `get_retrieval_service_dependency`)
 
 ### Vector Store Layer (Verified — Phase 4C)
 
 Phase 4C introduced a **provider-independent vector-storage layer** with FAISS as the sole Version 1 implementation. It stores embedding vectors together with enough identifier metadata to retrieve corresponding document chunks later, without persisting vectors in SQLite.
 
-**Purpose:** Accept pre-computed embedding vectors keyed by `chunk_id`, index them for nearest-neighbor search, persist the index to disk, and support removal by chunk identifier. Upload orchestration resolved in Phase 4D; ownership filtering and semantic retrieval remain Phase 4E.
+**Purpose:** Accept pre-computed embedding vectors keyed by `chunk_id`, index them for nearest-neighbor search, persist the index to disk, and support removal by chunk identifier. Upload orchestration resolved in Phase 4D; ownership filtering and semantic retrieval resolved in Phase 4E (`RetrievalService`, not in `VectorStore`).
 
 ```text
 EmbeddingProvider.dimensions
@@ -555,8 +658,8 @@ IndexIDMap2(IndexFlatIP)
 **Out of scope (Phase 4C — resolved in later phases):**
 
 - Upload embedding integration (Phase 4D — complete)
-- Ownership pre-filtering in search (Phase 4E)
-- Semantic retrieval API, RAG
+- Ownership pre-filtering in search (Phase 4E — complete in `RetrievalService`, not in `VectorStore`)
+- Semantic retrieval API (Phase 4E — complete; RAG/Q&A still planned)
 - Storing vectors in SQLite
 
 ---
@@ -579,7 +682,6 @@ Chunk queries must not bypass document ownership checks. Services should scope t
 
 | Gap | Notes |
 |-----|-------|
-| Semantic retrieval / search API | Phase 4E |
 | Q&A / citations / conversations | Planned |
 | Frontend | Planned |
 | Production DB, object storage, deployment | Planned |
@@ -599,6 +701,8 @@ Text-to-vector service layer: **resolved in Phase 4B**.
 FAISS vector storage layer: **resolved in Phase 4C**.
 
 Upload indexing orchestration: **resolved in Phase 4D**.
+
+Semantic retrieval / search API: **resolved in Phase 4E**.
 
 ---
 

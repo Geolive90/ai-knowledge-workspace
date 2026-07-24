@@ -1737,3 +1737,196 @@ None new. Uses Phase 4B/4C dependencies.
 Documented in `ARCHITECTURE.md` and `PROJECT_STATE.md`. See `ENGINEERING_LESSONS.md` for detailed lessons.
 
 ---
+
+# Embeddings — Phase 4E (Semantic Retrieval and Search API) — July 23, 2026
+
+## Status
+
+**Complete, verified, and approved** (July 23, 2026). Documentation closeout only at this step — application code and tests were implemented and verified earlier; not yet committed.
+
+## Objective
+
+Implement owner-scoped semantic search over indexed document chunks via `POST /search`. Thin router / fat `RetrievalService` boundary. Global FAISS search with bounded over-fetch and application-layer ownership plus `indexing_status='indexed'` filtering. No LLM answering, RAG response generation, citations, or conversation history.
+
+## Inspection Findings (Pre-Implementation)
+
+- Phase 4D indexing orchestration complete and committed at prior HEAD
+- No retrieval package, search router, or search schemas at inspection time
+- FAISS index global; `VectorStore.search()` ownership-agnostic (Phase 4C invariant)
+- FAISS chunk IDs aligned with `document_chunks.id`
+- `indexing_status='indexed'` required as retrieval readiness gate
+- `DocumentResponse` on list/detail endpoints does not include `chunk_count` or `vectors_indexed`
+
+## Approved Architecture
+
+```text
+POST /search (JWT)
+        ↓
+RetrievalService.search()
+        ↓
+validate query → embed query → bounded over-fetch
+        ↓
+VectorStore.search() (global FAISS)
+        ↓
+get_indexed_searchable_chunks_by_ids() (ownership + indexed gate)
+        ↓
+rank and limit → SearchResponse
+```
+
+**Explicit Phase 4E boundary:** retrieval only — no LLM, no RAG, no citations, no conversations.
+
+## Implementation Plan
+
+Two-commit sequence:
+
+1. **Commit 1 — Retrieval core:** `RetrievalService`, exceptions, factory, document-service hydration helper, config, unit tests
+2. **Commit 2 — HTTP API:** search schemas, router, DI wiring, main registration, API tests, conftest fakes
+
+## Commit 1 — Retrieval Core
+
+### Files Created (6)
+
+| File | Role |
+|------|------|
+| `02-Projects/backend/app/services/retrieval/__init__.py` | Package exports |
+| `02-Projects/backend/app/services/retrieval/exceptions.py` | `RetrievalError` hierarchy |
+| `02-Projects/backend/app/services/retrieval/result.py` | Immutable `SearchHit` and `SearchResult` dataclasses |
+| `02-Projects/backend/app/services/retrieval/service.py` | `RetrievalService.search()` orchestration |
+| `02-Projects/backend/app/services/retrieval/factory.py` | Factory and cache helpers |
+| `02-Projects/backend/tests/test_retrieval_service.py` | Unit tests (12) |
+
+### Files Modified (2)
+
+| File | Change |
+|------|--------|
+| `02-Projects/backend/app/config.py` | Retrieval settings (top_k, over-fetch, max query length) |
+| `02-Projects/backend/app/services/document_service.py` | `SearchableChunkRecord`, `get_indexed_searchable_chunks_by_ids()` |
+
+### Retrieval Configuration Defaults
+
+| Setting | Default |
+|---------|---------|
+| `search_default_top_k` | 10 |
+| `search_max_top_k` | 50 |
+| `search_over_fetch_multiplier` | 5 |
+| `search_over_fetch_min_buffer` | 20 |
+| `search_max_fetch_k` | 200 |
+| `search_max_query_length` | 4000 |
+
+### RetrievalService Behavior
+
+- Query validation (non-empty, max length) → `RetrievalValidationError`
+- Query embedding via `EmbeddingService` → `RetrievalEmbeddingError`
+- Bounded over-fetch: `fetch_k = min(index_count, search_max_fetch_k, max(top_k, top_k × multiplier, top_k + buffer))`
+- Global FAISS search via `VectorStore.search()` — ownership-agnostic
+- Hydrate via `get_indexed_searchable_chunks_by_ids(chunk_ids, user_id, document_id?)`
+- Ownership filtering: only chunks belonging to authenticated user
+- Indexing-status gate: only `indexing_status='indexed'` documents (literal string in document service)
+- Optional document scope: `document_id` restricts to one owned indexed document → `RetrievalNotFoundError` if missing or not owned
+- Rank by FAISS score; return at most `top_k` results (may be fewer after filtering)
+
+### Commit 1 Test Results
+
+| Suite | Result |
+|-------|--------|
+| Phase 4E retrieval unit tests | **12 passed** |
+| Full default suite | **132 passed**, 25 skipped |
+
+## Commit 2 — HTTP API
+
+### Files Created (3)
+
+| File | Role |
+|------|------|
+| `02-Projects/backend/app/schemas/search.py` | `SearchRequest`, `SearchResponse`, result item schemas |
+| `02-Projects/backend/app/routers/search.py` | `POST /search` thin router |
+| `02-Projects/backend/tests/test_search_api.py` | API tests (13) |
+
+### Files Modified (3)
+
+| File | Change |
+|------|--------|
+| `02-Projects/backend/app/dependencies.py` | `get_retrieval_service_dependency()` |
+| `02-Projects/backend/app/main.py` | Registered `search.router` |
+| `02-Projects/backend/tests/conftest.py` | `fake_retrieval_service`, `clear_retrieval_caches()` in autouse |
+
+### Exception Hierarchy and HTTP Mappings
+
+| Exception | HTTP | Response detail |
+|-----------|------|-----------------|
+| `RetrievalValidationError` | 422 | Validation message from service |
+| `RetrievalNotFoundError` | 404 | `"Document not found."` |
+| `RetrievalEmbeddingError` | 500 | `"Search could not be completed."` |
+| `RetrievalVectorStoreError` | 500 | `"Search could not be completed."` |
+| `RetrievalError` (base) | 500 | `"Search could not be completed."` |
+
+Missing or invalid JWT → **401** (existing auth dependency).
+
+### Commit 2 Test Results
+
+| Suite | Result |
+|-------|--------|
+| Phase 4E search API tests | **13 passed** |
+| Full default suite | **145 passed**, 25 skipped, 0 failed, 3 pre-existing warnings |
+
+## Files Summary (Phase 4E Total)
+
+**Created (9):** retrieval package (5), `schemas/search.py`, `routers/search.py`, `tests/test_retrieval_service.py`, `tests/test_search_api.py`
+
+**Modified (5):** `config.py`, `document_service.py`, `dependencies.py`, `main.py`, `tests/conftest.py`
+
+**Total touched:** 14 files. No new migrations. No new runtime dependencies.
+
+## Manual Verification (July 23, 2026)
+
+| Item | Value |
+|------|-------|
+| Alembic head | `a7c2d9e48103` (unchanged — no Phase 4E migration) |
+| Manual test user | `phase4e-manual@example.com` |
+| Manual document ID | 4 |
+| Manual document filename | `phase4e-search.txt` |
+| Indexing status | `indexed` |
+| Upload response `chunk_count` | 1 |
+| Upload response `vectors_indexed` | 1 |
+| Search query | `neural networks verification` |
+| Successful score | `0.5060461163520813` |
+
+**Verified scenarios:**
+
+- **HTTP 200** — global semantic search returned one expected chunk with score (single result; not used to verify multi-result ordering)
+- **HTTP 200** — document-scoped semantic search (`document_id=4`) returned the same single chunk
+- **422** — empty/invalid query rejected
+- **401** — unauthenticated request rejected
+- **404** — scoped search on non-owned or missing document
+- Document list, get, and download regression checks passed
+- Delete intentionally skipped to preserve search test document
+
+**Pre- and post-test Git status:** Limited to expected Phase 4E application and documentation changes only.
+
+## Manual Verification Expectation Correction
+
+During manual verification, an additional check expected `chunk_count` and `vectors_indexed` on `GET /documents` (list/detail).
+
+**Finding:** Those fields were absent because the existing `DocumentResponse` contract does not include them. They belong to upload and indexing outcome responses (e.g. `POST /documents/upload`).
+
+**Upload verification confirmed both values:** `chunk_count=1`, `vectors_indexed=1`.
+
+**Disposition:** Classified as a **verification-expectation mismatch**, not a code regression. No production-code change made. Richer document metadata on list/detail endpoints recorded as a possible future enhancement only.
+
+## Final Automated Test Baseline
+
+| Suite | Result |
+|-------|--------|
+| Phase 4E retrieval unit tests | 12 passed |
+| Phase 4E search API tests | 13 passed |
+| Full default suite | **145 passed**, 25 skipped, 0 failed, 3 pre-existing warnings |
+
+## Not in Phase 4E Scope (Confirmed)
+
+- LLM answering and RAG response generation
+- Citations and conversation history
+- Changes to `DocumentResponse` or document list/detail/download endpoints
+- Index rebuild from `chunk_text` (Phase 4F)
+- New migrations or runtime dependencies
+
+---

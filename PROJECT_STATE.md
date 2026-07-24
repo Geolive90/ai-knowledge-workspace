@@ -267,6 +267,31 @@ The exact structure must be inspected before any AI assistant makes changes.
 - Defects found and fixed during verification: delete/index race; compensation error logging/context; `_mark_failed` rollback; stored-file delete logging
 - No semantic retrieval (Phase 4E), no new runtime dependencies
 
+### Embeddings — Phase 4E (Semantic Retrieval and Search API)
+
+- **Status:** complete, verified, and approved (July 23, 2026)
+- `RetrievalService` orchestration layer — query validation, embedding, bounded over-fetch, global FAISS search, ownership filtering, `indexing_status='indexed'` gate, ranking
+- `POST /search` — JWT-protected semantic search endpoint
+- Optional `document_id` for document-scoped retrieval
+- Ownership isolation verified — cross-user chunks excluded from results
+- Indexed-status readiness gate verified — non-indexed documents excluded
+- Document-scoped search verified
+- Safe error mapping verified — 422 validation, 401 auth, 404 scoped document, 500 embedding/vector-store failures
+- **`create_document_with_chunks()` contract preserved unchanged**
+- **Source files created (9):**
+  - `app/services/retrieval/{__init__,exceptions,result,service,factory}.py`
+  - `app/schemas/search.py`
+  - `app/routers/search.py`
+  - `tests/{test_retrieval_service,test_search_api}.py`
+- **Modified (5):** `config.py`, `dependencies.py`, `main.py`, `services/document_service.py`, `tests/conftest.py`
+- **Final test results:**
+  - Phase 4E retrieval unit tests: **12 passed**
+  - Phase 4E search API tests: **13 passed**
+  - Full default suite: **145 passed**, 25 skipped, 0 failed, 3 pre-existing warnings
+- Manual semantic retrieval verification complete
+- No LLM answering, RAG response generation, citations, or conversation history (Phase 4E boundary)
+- No changes to `DocumentResponse` or document list/detail endpoints
+
 ### Service and Utility Foundation
 
 - Document schema created
@@ -282,28 +307,27 @@ The exact structure must be inspected before any AI assistant makes changes.
 
 Milestone:
 
-Embeddings — Phase 4D (Document Indexing Orchestration)
+Embeddings — Phase 4E (Semantic Retrieval and Search API)
 
-- **Implemented, verified, and approved:** July 22, 2026
-- **Git commit:** recorded at Phase 4D closeout (July 22, 2026)
+- **Implemented, verified, and approved:** July 23, 2026
+- **Git commit:** not yet committed at closeout (local implementation complete)
 
 The milestone included:
 
-- `app/services/indexing/` package (5 files) — orchestration service, factory, exceptions, results
-- Alembic migration `a7c2d9e48103` — document indexing lifecycle columns
-- Upload integration: synchronous indexing after `create_document_with_chunks()`
-- `POST /documents/{document_id}/index` retry/force-reindex endpoint
-- Delete integration: purge → DB delete → file delete (with document lock)
-- 5 new test files (51 Phase 4D indexing tests including compensation gaps)
-- **10 files created, 9 files modified** (19 total touched)
-- Default suite: **120 passed**, 25 skipped
-- All gates: **145 passed**, 0 skipped
-- Defects corrected: delete/index race; compensation error context; failed-status rollback; stored-file delete logging
+- `app/services/retrieval/` package (5 files) — orchestration service, factory, exceptions, results
+- `POST /search` router with JWT authentication and exception-to-HTTP mapping
+- `document_service.get_indexed_searchable_chunks_by_ids()` — ownership + indexed-status hydration
+- Retrieval configuration in `app/config.py` (top_k defaults, over-fetch bounds, max query length)
+- 2 new test files (25 Phase 4E tests: 12 retrieval unit + 13 search API)
+- **9 files created, 5 files modified** (14 total touched)
+- Default suite: **145 passed**, 25 skipped, 0 failed, 3 pre-existing warnings
+- Manual verification: global and document-scoped search, error cases, document endpoint regression checks
 
 Previous verified milestone:
 
-Embeddings — Phase 4C (Vector Store / FAISS) — July 22, 2026
+Embeddings — Phase 4D (Document Indexing Orchestration) — July 22, 2026
 
+- Embeddings — Phase 4C (Vector Store / FAISS) — July 22, 2026
 - Embeddings — Phase 4B (Embedding Provider and Service) — July 22, 2026
 - Embeddings — Phase 4A (Embedding Metadata Schema) — July 22, 2026
 - Document Chunking — Phase 3 (Upload Orchestration) — July 22, 2026
@@ -318,7 +342,7 @@ Embeddings — Phase 4C (Vector Store / FAISS) — July 22, 2026
 
 Current area of work:
 
-**Phase 4E — Semantic retrieval and search API** — next planned milestone; **not started**.
+**Phase 4F — Index rebuild and deletion consistency hardening** — next approved milestone; **not started**.
 
 Repository state:
 
@@ -327,10 +351,11 @@ Repository state:
 - Embeddings **Phase 4B:** text-to-vector service layer complete — `EmbeddingService` + `SentenceTransformersProvider`
 - Embeddings **Phase 4C:** FAISS vector storage layer complete — `VectorStore` + `FaissVectorStore`
 - Embeddings **Phase 4D:** document indexing orchestration complete — upload + retry index + delete purge
+- Embeddings **Phase 4E:** semantic retrieval complete — `RetrievalService` + `POST /search`
 - Upload persists normalized `extracted_text` and chunk rows atomically, then indexes synchronously
-- Only `indexing_status='indexed'` means indexing completed (Phase 4E retrieval gate)
+- Only `indexing_status='indexed'` documents are searchable (Phase 4E gate enforced)
 - Vectors stored in FAISS only (Version 1); `chunk_embeddings` holds metadata only
-- No semantic search or RAG yet
+- No LLM answering, RAG response generation, citations, or conversation history yet
 
 See `ARCHITECTURE.md` for embedding and vector-store architecture and invariants.
 
@@ -340,18 +365,17 @@ See `ARCHITECTURE.md` for embedding and vector-store architecture and invariants
 
 The expected implementation sequence is:
 
-1. **Phase 4E — Semantic retrieval and search API** — next; not started
-2. Phase 4F — Index rebuild and deletion consistency hardening
-3. Add question-answering endpoint.
-6. Add grounded AI responses.
-7. Add citations.
-8. Add conversation and message history.
-9. Add frontend.
-10. Add Docker configuration.
-11. Add production database migration.
-12. Add cloud file storage.
-13. Add deployment.
-14. Add monitoring, logging, and security hardening.
+1. **Phase 4F — Index rebuild and deletion consistency hardening** — next; not started
+2. Add question-answering endpoint.
+3. Add grounded AI responses.
+4. Add citations.
+5. Add conversation and message history.
+6. Add frontend.
+7. Add Docker configuration.
+8. Add production database migration.
+9. Add cloud file storage.
+10. Add deployment.
+11. Add monitoring, logging, and security hardening.
 
 The sequence may be adjusted after inspecting the current implementation.
 
@@ -410,8 +434,15 @@ Areas still requiring attention include:
 - Extracted text **is persisted** on upload in `documents.extracted_text` (nullable for legacy rows).
 - Upload normalizes extracted text at orchestration and persists chunk rows atomically (Phase 3).
 - Upload indexes chunks synchronously after persist (Phase 4D).
-- Embedding **metadata schema** exists (`chunk_embeddings`, Phase 4A); **text-to-vector service** exists (Phase 4B); **FAISS vector storage** exists (Phase 4C); **indexing orchestration** exists (Phase 4D)
-- Semantic retrieval and Q&A are unfinished.
+- Embedding **metadata schema** exists (`chunk_embeddings`, Phase 4A); **text-to-vector service** exists (Phase 4B); **FAISS vector storage** exists (Phase 4C); **indexing orchestration** exists (Phase 4D); **semantic retrieval** exists (Phase 4E)
+- Question answering, RAG response generation, citations, and conversations are unfinished.
+
+### Phase 4E Known Version 1 Limitations
+
+- Global FAISS index — `VectorStore.search()` is ownership-agnostic; `RetrievalService` uses bounded over-fetch plus application-layer ownership and `indexing_status='indexed'` filtering
+- Results may validly contain fewer items than `top_k` after filtering
+- No LLM answering, RAG, citations, or conversation history
+- `DocumentResponse` on list/detail endpoints does not include `chunk_count` or `vectors_indexed` (upload/index outcome fields only; richer metadata deferred as future enhancement)
 
 ### Phase 4D Known Version 1 Limitations
 
@@ -423,13 +454,13 @@ Areas still requiring attention include:
 - Failed-status commit failure leaves `processing` until stale timeout reclaim (proven recoverable)
 - Compensation purge failures may leave orphan vectors until healthy retry (proven recoverable)
 - No `content_hash` or document replacement flow — force reindex via index endpoint only
-- Phase 4E must gate retrieval on `indexing_status='indexed'`, not metadata/FAISS alone
+- Phase 4E gates retrieval on `indexing_status='indexed'` (enforced in `RetrievalService`)
 
 ### Phase 4C Known Version 1 Limitations
 
 - Single-process RLock; not safe for concurrent multi-worker index sharing without external coordination
 - Explicit `save()` required after mutations — no auto-save
-- Ownership pre-filtering not in VectorStore — deferred to Phase 4E retrieval layer
+- Ownership pre-filtering not in VectorStore — implemented in Phase 4E `RetrievalService` (not in VectorStore)
 - Index recovery from `chunk_text` designed but not implemented (Phase 4F)
 
 ### Phase 4A Non-Blocking Observations (Recorded at Review)
