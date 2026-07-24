@@ -15,6 +15,15 @@ class IndexingChunkRecord:
     chunk_text: str
 
 
+@dataclass(frozen=True)
+class SearchableChunkRecord:
+    chunk_id: int
+    document_id: int
+    document_filename: str
+    chunk_index: int
+    chunk_text: str
+
+
 def get_documents_for_user(db: Session, user_id: int) -> list[Document]:
     return (
         db.query(Document)
@@ -68,6 +77,45 @@ def get_document_chunk_ids(db: Session, document_id: int) -> list[int]:
         .all()
     )
     return [row[0] for row in rows]
+
+
+def get_indexed_searchable_chunks_by_ids(
+    db: Session,
+    *,
+    user_id: int,
+    chunk_ids: list[int],
+    document_id: int | None = None,
+) -> list[SearchableChunkRecord]:
+    if not chunk_ids:
+        return []
+
+    query = (
+        db.query(DocumentChunk, Document)
+        .join(Document, DocumentChunk.document_id == Document.id)
+        .filter(
+            Document.user_id == user_id,
+            Document.indexing_status == "indexed",
+            DocumentChunk.id.in_(chunk_ids),
+        )
+    )
+
+    if document_id is not None:
+        query = query.filter(Document.id == document_id)
+
+    rows = query.all()
+    records = [
+        SearchableChunkRecord(
+            chunk_id=chunk.id,
+            document_id=document.id,
+            document_filename=document.filename,
+            chunk_index=chunk.chunk_index,
+            chunk_text=chunk.chunk_text,
+        )
+        for chunk, document in rows
+    ]
+    order = {chunk_id: index for index, chunk_id in enumerate(chunk_ids)}
+    records.sort(key=lambda record: order[record.chunk_id])
+    return records
 
 
 def create_document(
